@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
 import { AcmeProblem } from "../../../src/lib/acme/AcmeProblem.js";
-import { caaPermits, CaaRecord, DnsChecks, DnsLookup, SystemDnsLookup } from "../../../src/lib/acme/Dns.js";
+import { caaPermits, CaaRecord, CaaValidator, DnsChecks, DnsLookup, SystemDnsLookup } from "../../../src/lib/acme/Dns.js";
 
 const ME = ["rapidmx.io"];
 
@@ -136,5 +136,77 @@ describe("SystemDnsLookup", () => {
         expect(typeof system.resolve4).toBe("function");
         expect(typeof system.resolve6).toBe("function");
         expect(typeof system.resolveCaa).toBe("function");
+    });
+});
+
+describe("DnsChecks.assertCaaPermits with a DNSSEC validator", () => {
+    type Answer = { status: "secure" | "insecure"; records: Array<{ critical: number; tag: string; value: string }> };
+    const fail = (kind: string, reason: string) => Object.assign(new Error(reason), { kind, reason });
+
+    /** A validator answering from a table; a name not in it is a validated empty answer. */
+    const validator = (table: Record<string, Answer | Error>, calls: string[] = []): CaaValidator => ({
+        resolveCaa: async (name) => {
+            calls.push(name);
+            const answer = table[name];
+            if (answer instanceof Error) {
+                throw answer;
+            }
+            return answer ?? { status: "secure", records: [] };
+        },
+    });
+    const neverAsked: DnsLookup = lookup({
+        resolveCaa: async () => {
+            throw new Error("the unvalidated resolver must not be used for CAA");
+        },
+    });
+    const checks = (table: Record<string, Answer | Error>, calls: string[] = []) => new DnsChecks(neverAsked, ME, validator(table, calls));
+
+    it("uses the validator instead of the system resolver, climbing to the first record set", async () => {
+        const calls: string[] = [];
+        const c = checks({ "example.org": { status: "secure", records: [{ critical: 0, tag: "issuemail", value: "rapidmx.io" }] } }, calls);
+        expect(await c.assertCaaPermits("a.example.org")).toBe("secure");
+        expect(calls).toEqual(["a.example.org", "example.org"]);
+    });
+
+    it("enforces the policy of a validated record set", async () => {
+        const c = checks({ "example.org": { status: "secure", records: [{ critical: 0, tag: "issuemail", value: "other.example" }] } });
+        expect(await problemOf(c.assertCaaPermits("example.org"))).toBe("caa");
+        const critical = checks({ "example.org": { status: "secure", records: [{ critical: 128, tag: "futureprop", value: "x" }] } });
+        expect(await problemOf(critical.assertCaaPermits("example.org"))).toBe("caa");
+    });
+
+    it("reports secure only when every look-up was validated, insecure when one came from an unsigned zone", async () => {
+        expect(await checks({}).assertCaaPermits("a.example.org")).toBe("secure");
+        expect(await checks({ "example.org": { status: "insecure", records: [] } }).assertCaaPermits("a.example.org")).toBe("insecure");
+        expect(await new DnsChecks(lookup({}), ME).assertCaaPermits("example.org")).toBe("unvalidated");
+    });
+
+    it("refuses the order when validation fails (bogus) or cannot be completed (indeterminate)", async () => {
+        const bogus = checks({ "example.org": fail("bogus", "RRSIG has expired") });
+        await expect(bogus.assertCaaPermits("example.org")).rejects.toThrow(/DNSSEC validation .*RRSIG has expired/);
+        expect(await problemOf(bogus.assertCaaPermits("example.org"))).toBe("dns");
+        const unknown = checks({ org: fail("indeterminate", "no answer from any server") });
+        expect(await problemOf(unknown.assertCaaPermits("example.org"))).toBe("dns");
+        const plain = checks({ "example.org": new Error("boom") });
+        expect(await problemOf(plain.assertCaaPermits("example.org"))).toBe("dns");
+    });
+
+    it("bounds the length of an error reason that reaches the applicant", async () => {
+        const c = checks({ "example.org": fail("bogus", "x".repeat(5000)) });
+        await expect(c.assertCaaPermits("example.org")).rejects.toSatisfy((err: Error) => err.message.length < 500);
+    });
+});
+
+describe("DnsChecks.assertCaaPermits deadline", () => {
+    it("refuses with a dns problem when the validator never answers", async () => {
+        vi.useFakeTimers();
+        try {
+            const hung: CaaValidator = { resolveCaa: () => new Promise(() => undefined) };
+            const pending = problemOf(new DnsChecks(lookup({}), ME, hung).assertCaaPermits("example.org"));
+            await vi.advanceTimersByTimeAsync(31_000);
+            expect(await pending).toBe("dns");
+        } finally {
+            vi.useRealTimers();
+        }
     });
 });

@@ -11,7 +11,7 @@ import * as prom from "prom-client";
 import { MongoMemoryServer } from "mongodb-memory-server";
 import { Logger } from "@rapidrest/core";
 import { ObjectFactory, Server } from "@rapidrest/service-core";
-import { CaaRecord, DnsLookup } from "../../src/lib/acme/Dns.js";
+import { CaaRecord, CaaValidator, DnsLookup } from "../../src/lib/acme/Dns.js";
 import { MemoryChallengeMailer, DnsTxtResolver } from "../../src/lib/mail/index.js";
 import { AcmeContext } from "../../src/services/AcmeContext.js";
 import { createTestCa } from "./ca.js";
@@ -27,6 +27,35 @@ export function resetDns(): void {
     dnsState.caa = {};
     dnsState.noMail = new Set();
     dnsState.failing = new Set();
+}
+
+/**
+ * What the stub DNSSEC validator answers, by name: an entry in `answers` (`insecure` for an unsigned zone) or a failure (`bogus` /
+ * `indeterminate`). A name in neither is a validated empty answer. Only used by a CA started with `{ dnssec: true }`.
+ */
+export const dnssecState: {
+    answers: Record<string, { records: Array<{ critical: number; tag: string; value: string }>; insecure?: boolean }>;
+    failures: Record<string, "bogus" | "indeterminate">;
+    asked: string[];
+} = { answers: {}, failures: {}, asked: [] };
+
+export function resetDnssec(): void {
+    dnssecState.answers = {};
+    dnssecState.failures = {};
+    dnssecState.asked = [];
+}
+
+/** A `CaaValidator` that answers from `dnssecState` (registered as `CaaValidator` when a CA is started with `{ dnssec: true }`). */
+export class TestCaaValidator implements CaaValidator {
+    public async resolveCaa(name: string): Promise<{ status: "secure" | "insecure"; records: Array<{ critical: number; tag: string; value: string }> }> {
+        dnssecState.asked.push(name);
+        const failure = dnssecState.failures[name];
+        if (failure) {
+            throw Object.assign(new Error(`${failure} (test)`), { kind: failure, reason: `${failure}: test failure at ${name}` });
+        }
+        const answer = dnssecState.answers[name];
+        return { status: answer?.insecure ? "insecure" : "secure", records: answer?.records ?? [] };
+    }
 }
 
 /** A `DnsLookup` that answers from `dnsState` and never touches the network: every domain has a mail server unless told otherwise. */
@@ -103,7 +132,7 @@ async function freePort(): Promise<number> {
  * @param overrides Extra configuration, keyed like nconf (`"acme:rate_limits:enabled": false`).
  * @param options `issuerDays`: how long the generated issuing CA certificate lasts (default five years).
  */
-export async function startCa(overrides: Record<string, unknown> = {}, options: { issuerDays?: number } = {}): Promise<CaHarness> {
+export async function startCa(overrides: Record<string, unknown> = {}, options: { issuerDays?: number; dnssec?: boolean } = {}): Promise<CaHarness> {
     resetDns();
     const mongod: MongoMemoryServer = await MongoMemoryServer.create({ instance: { dbName: "acme-test" } });
     const port: number = await freePort();
@@ -155,6 +184,10 @@ export async function startCa(overrides: Record<string, unknown> = {}, options: 
     const logger = Logger("warn");
     const objectFactory: ObjectFactory = new ObjectFactory(conf, logger);
     objectFactory.register(TestDnsLookup, "DnsLookup");
+    if (options.dnssec) {
+        resetDnssec();
+        objectFactory.register(TestCaaValidator, "CaaValidator");
+    }
     objectFactory.register(MemoryChallengeMailer, "ChallengeMailTransport");
     objectFactory.register(TestDkimResolver, "DkimResolver");
     // The framework registers its request metrics in prom-client's global registry, which allows one server per process.

@@ -46,6 +46,15 @@ export class SystemDnsLookup implements DnsLookup {
     }
 }
 
+/** A DNSSEC-validating CAA resolver (`DnssecResolver` in `lib/dnssec`): what `DnsChecks` needs from it, so tests can stand in. */
+export interface CaaValidator {
+    /** The validated CAA records at exactly `name`; throws an error with `kind` `bogus` or `indeterminate` when they cannot be trusted. */
+    resolveCaa(name: string): Promise<{ status: "secure" | "insecure"; records: Array<{ critical: number; tag: string; value: string }> }>;
+}
+
+/** The longest a whole DNSSEC-validated CAA check (all the look-ups up the tree) may take before the order is refused as a `dns` problem. */
+export const CAA_VALIDATION_DEADLINE_MS = 30_000;
+
 /** The tags this CA understands. A critical record with any other tag forbids issuance (RFC 8659 §4.2). */
 const KNOWN_CAA_TAGS: readonly string[] = ["issue", "issuewild", "iodef", "issuemail", "contactemail", "contactphone"];
 
@@ -92,6 +101,15 @@ export function caaPermits(records: CaaRecord[], identities: readonly string[]):
     return !restricted || allowed;
 }
 
+/** Rejects with an `indeterminate` DNSSEC error when `promise` has not settled within `ms`. */
+function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    const expired = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(Object.assign(new Error("timed out"), { kind: "indeterminate", reason: "the DNSSEC validation did not finish in time" })), Math.max(ms, 0));
+    });
+    return Promise.race([promise, expired]).finally(() => clearTimeout(timer));
+}
+
 /**
  * The look-ups a mailbox certificate order depends on: can the domain receive the verification e-mail at all, and does
  * its CAA policy allow this CA.
@@ -101,10 +119,15 @@ export function caaPermits(records: CaaRecord[], identities: readonly string[]):
 export class DnsChecks {
     private readonly lookup: DnsLookup;
     private readonly caaIdentities: readonly string[];
+    private readonly validator?: CaaValidator;
 
-    constructor(lookup: DnsLookup, caaIdentities: readonly string[]) {
+    /**
+     * @param validator A DNSSEC-validating CAA resolver. When given it replaces `lookup.resolveCaa()` for CAA.
+     */
+    constructor(lookup: DnsLookup, caaIdentities: readonly string[], validator?: CaaValidator) {
         this.lookup = lookup;
         this.caaIdentities = caaIdentities;
+        this.validator = validator;
     }
 
     /**
@@ -147,21 +170,45 @@ export class DnsChecks {
     /**
      * Checks the domain's CAA policy (RFC 8659 §3: the closest record set found climbing from the domain to the root).
      *
-     * @throws `caa` when the policy forbids this CA, `dns` when a lookup failed (failing closed: issuing without knowing the
-     * policy is worse than asking the applicant to retry).
+     * With a `validator` every look-up is DNSSEC-validated by this process (see `lib/dnssec`): an answer from a signed zone is
+     * accepted only when its signatures chain to the root, an unsigned delegation proven by the parent's signed denial of a DS is
+     * accepted as unsigned (RFC 8659 §3.1: the CA may issue), and anything else - a broken signature, a missing proof, a stripped
+     * signature - refuses the order. Without one the look-up is the system resolver's, unvalidated.
+     *
+     * @returns How the policy was established: `secure` when every look-up on the way was validated, `insecure` when at least one was
+     * accepted from an unsigned zone, `unvalidated` when no validator is configured.
+     * @throws `caa` when the policy forbids this CA, `dns` when a lookup failed or DNSSEC validation failed (failing closed:
+     * issuing without knowing the policy is worse than asking the applicant to retry).
      */
-    public async assertCaaPermits(domain: string): Promise<void> {
+    public async assertCaaPermits(domain: string): Promise<"secure" | "insecure" | "unvalidated"> {
         const labels: string[] = domain.toLowerCase().split(".");
+        let outcome: "secure" | "insecure" | "unvalidated" = this.validator ? "secure" : "unvalidated";
+        const deadline: number = Date.now() + CAA_VALIDATION_DEADLINE_MS;
         for (let i = 0; i < labels.length; i++) {
             const name: string = labels.slice(i).join(".");
             let records: CaaRecord[];
-            try {
-                records = await this.lookup.resolveCaa(name);
-            } catch (err: any) {
-                if (isNoData(err)) {
-                    continue;
+            if (this.validator) {
+                try {
+                    const answer = await withDeadline(this.validator.resolveCaa(name), deadline - Date.now());
+                    records = answer.records.map((r) => ({ critical: r.critical, [r.tag]: r.value }));
+                    if (answer.status === "insecure") {
+                        outcome = "insecure";
+                    }
+                } catch (err: any) {
+                    if (err?.kind === "bogus") {
+                        throw new AcmeProblem("dns", `DNSSEC validation of the CAA records at ${name} failed (${String(err.reason ?? err.message).slice(0, 200)}), so the CAA policy cannot be established.`);
+                    }
+                    throw new AcmeProblem("dns", `The CAA records at ${name} could not be looked up and validated: ${String(err?.reason ?? err?.message ?? "error").slice(0, 200)}.`);
                 }
-                throw new AcmeProblem("dns", `DNS CAA lookup for ${name} failed: ${err?.code ?? "error"}.`);
+            } else {
+                try {
+                    records = await this.lookup.resolveCaa(name);
+                } catch (err: any) {
+                    if (isNoData(err)) {
+                        continue;
+                    }
+                    throw new AcmeProblem("dns", `DNS CAA lookup for ${name} failed: ${err?.code ?? "error"}.`);
+                }
             }
             if (records.length === 0) {
                 continue;
@@ -169,7 +216,8 @@ export class DnsChecks {
             if (!caaPermits(records, this.caaIdentities)) {
                 throw new AcmeProblem("caa", `The CAA records at ${name} do not authorize this CA to issue e-mail certificates (issuemail: ${this.caaIdentities.join(", ")}).`);
             }
-            return;
+            return outcome;
         }
+        return outcome;
     }
 }

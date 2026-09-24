@@ -81,7 +81,8 @@ export function keyTag(rdata: Uint8Array): number {
  * SHA-1 (1) is computable here so RFC vectors can be checked, but validation never accepts it.
  */
 export function dsDigest(owner: DnsName, dnskeyRdata: Uint8Array, digestType: number): Buffer | undefined {
-    const algorithm: string | undefined = digestType === 1 ? "sha1" : digestType === 2 ? "sha256" : digestType === 4 ? "sha384" : undefined;
+    const algorithm: string | undefined =
+        digestType === 1 ? "sha1" : digestType === 2 ? "sha256" : digestType === 4 ? "sha384" : undefined;
     if (!algorithm) {
         return undefined;
     }
@@ -168,18 +169,31 @@ export function importPublicKey(algorithm: number, key: Buffer): KeyObject | und
         }
         if (algorithm === ALGORITHM.ECDSAP256SHA256 && key.length === 64) {
             return createPublicKey({
-                key: { kty: "EC", crv: "P-256", x: key.subarray(0, 32).toString("base64url"), y: key.subarray(32).toString("base64url") },
+                key: {
+                    kty: "EC",
+                    crv: "P-256",
+                    x: key.subarray(0, 32).toString("base64url"),
+                    y: key.subarray(32).toString("base64url"),
+                },
                 format: "jwk",
             });
         }
         if (algorithm === ALGORITHM.ECDSAP384SHA384 && key.length === 96) {
             return createPublicKey({
-                key: { kty: "EC", crv: "P-384", x: key.subarray(0, 48).toString("base64url"), y: key.subarray(48).toString("base64url") },
+                key: {
+                    kty: "EC",
+                    crv: "P-384",
+                    x: key.subarray(0, 48).toString("base64url"),
+                    y: key.subarray(48).toString("base64url"),
+                },
                 format: "jwk",
             });
         }
         if (algorithm === ALGORITHM.ED25519 && key.length === 32) {
-            return createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: key.toString("base64url") }, format: "jwk" });
+            return createPublicKey({
+                key: { kty: "OKP", crv: "Ed25519", x: key.toString("base64url") },
+                format: "jwk",
+            });
         }
         if (algorithm === ALGORITHM.ED448 && key.length === 57) {
             return createPublicKey({ key: { kty: "OKP", crv: "Ed448", x: key.toString("base64url") }, format: "jwk" });

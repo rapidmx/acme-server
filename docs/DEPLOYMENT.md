@@ -112,6 +112,13 @@ Applicants' domains are checked too: a domain that publishes a CAA `issuemail` r
 `acme.caa_identities` (default `["rapidmx.io"]`; set it to **your** operator identity, chart value `acme.caaIdentities`), and
 must be able to receive mail (the CA looks up its MX record).
 
+**CAA is DNSSEC-validated by the CA itself**, not by trusting the resolver's word: the CA queries a recursive resolver for the CAA
+records with the DO bit and validates the signature chain from the IANA root trust anchors in-process. It fails closed: a bogus or
+unprovable answer refuses the order with a `dns` problem, so the resolver must return DNSSEC records (RRSIG, DNSKEY, DS, NSEC/NSEC3)
+and allow EDNS0 and TCP fallback. Public resolvers (`9.9.9.9`, `1.1.1.1`, `8.8.8.8`) do; some forwarders strip DNSSEC records and
+would refuse every order. Set `acme.dns.servers` (chart: `extraEnv: acme__dns__servers`) to resolvers you know work. Outside
+development `acme.dns.dnssec: off` is refused at start-up.
+
 ## 3. Inbound e-mail: how replies reach the CA
 
 The applicant's client replies to `acme.mail.reply_to`. The CA accepts a message only for its two addresses
@@ -446,7 +453,8 @@ show what it issued, the CRLs it published shrink to nothing (revoked certificat
   ```
 
   Publicly accessible DNS resolution must still work: if your cluster DNS does not forward, allow the resolvers named in
-  `acme.dns.servers` instead.
+  `acme.dns.servers` instead. The DNSSEC validation sends its own UDP queries (TCP on truncation) to those resolvers, so both
+  UDP and TCP port 53 must be open to them, and they must pass DNSSEC records through.
 * [ ] **MongoDB and Redis are unreachable from outside** their namespace and from other workloads: the chart enables their
   NetworkPolicies (only pods carrying the `<name>-client` label may connect), keeps the Services `ClusterIP`, enables
   authentication and never routes them through the Gateway. NetworkPolicy only works on a CNI that enforces it - check yours.

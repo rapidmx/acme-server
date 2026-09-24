@@ -142,6 +142,11 @@ export class AcmeSettings {
         return Array.isArray(value) ? value.map(String) : [];
     }
 
+    /** `validate` (default): CAA is looked up and DNSSEC-validated in-process; `off` uses the system resolver unvalidated. */
+    public get dnssecValidation(): boolean {
+        return this.str("acme:dns:dnssec", "validate").toLowerCase() !== "off";
+    }
+
     public get rateLimitsEnabled(): boolean {
         return this.bool("rate_limits:enabled", true);
     }

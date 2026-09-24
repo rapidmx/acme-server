@@ -5,8 +5,9 @@
 import { indeterminate } from "./types.js";
 
 /**
- * Domain names inside this library are strings in presentation form without a trailing dot, lower-cased, with `\.`, `\` and
- * `\DDD` escapes for the bytes that are not plain label characters. The root is the empty string. Keeping one normalised
+ * Domain names inside this library are strings in presentation form without a trailing dot, lower-cased, with backslash
+ * escapes (a backslash before a dot or backslash, or a backslash and three decimal digits) for the bytes that are not plain
+ * label characters. The root is the empty string. Keeping one normalised
  * spelling makes names usable as map keys and comparable with `===`.
  */
 export type DnsName = string;
@@ -31,9 +32,9 @@ function escapeLabel(label: string): string {
     for (let i = 0; i < label.length; i++) {
         const code: number = label.charCodeAt(i);
         if (code === 0x2e || code === 0x5c) {
-            out += `\${label[i]}`;
+            out += "\\" + label[i];
         } else if (code < 0x21 || code > 0x7e) {
-            out += `\${code.toString().padStart(3, "0")}`;
+            out += "\\" + code.toString().padStart(3, "0");
         } else {
             out += label[i];
         }

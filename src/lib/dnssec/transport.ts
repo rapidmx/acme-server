@@ -45,7 +45,13 @@ function isAnswerTo(bytes: Buffer, expected: Expectation): boolean {
     }
 }
 
-function udpExchange(host: string, port: number, packet: Buffer, expected: Expectation, timeoutMs: number): Promise<Buffer> {
+function udpExchange(
+    host: string,
+    port: number,
+    packet: Buffer,
+    expected: Expectation,
+    timeoutMs: number
+): Promise<Buffer> {
     return new Promise<Buffer>((resolve, reject) => {
         const socket = createSocket(isIP(host) === 6 ? "udp6" : "udp4");
         let done = false;
@@ -81,7 +87,13 @@ function udpExchange(host: string, port: number, packet: Buffer, expected: Expec
     });
 }
 
-function tcpExchange(host: string, port: number, packet: Buffer, expected: Expectation, timeoutMs: number): Promise<Buffer> {
+function tcpExchange(
+    host: string,
+    port: number,
+    packet: Buffer,
+    expected: Expectation,
+    timeoutMs: number
+): Promise<Buffer> {
     return new Promise<Buffer>((resolve, reject) => {
         const socket = connect({ host, port });
         let done = false;

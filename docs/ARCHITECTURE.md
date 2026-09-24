@@ -75,7 +75,8 @@ acme.rate_limits.overrides     [{ "limit": "<limit name>", "subject": "<account 
 acme.max_identifiers           1
 acme.metrics_secret            bearer secret of GET /metrics (unset = 404)
 acme.admin_secret              bearer secret of the operator API /admin (unset = 404; >= 32 characters outside development)
-acme.dns.servers               ["9.9.9.9"]                  resolvers for MX/CAA look-ups (default: the system's)
+acme.dns.servers               ["9.9.9.9"]                  resolvers for MX/CAA look-ups (default: the system's); they need only relay DNSSEC records
+acme.dns.dnssec                "validate"                   CAA is DNSSEC-validated in-process against the root anchors; "off" is refused outside development
 ```
 
 Outside `dev`/`development`/`test` the server refuses to start with the default secrets, without `external_url`, or

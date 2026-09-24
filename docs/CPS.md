@@ -57,7 +57,11 @@ from the order's.
 
 1. The applicant (an ACME account) orders a certificate for one address. The domain must be able to receive mail (MX or address
    record; a null MX per RFC 7505 is refused) and its CAA `issuemail` policy (RFC 9495; climbing the DNS tree per RFC 8659) must
-   permit this CA. A failed DNS lookup refuses the order rather than guessing.
+   permit this CA. A failed DNS lookup refuses the order rather than guessing. The CAA records are DNSSEC-validated by the CA itself
+   (RFC 8659 §3.1): an answer from a signed zone is used only when its signatures chain to the root trust anchors, a zone proven
+   unsigned (an authenticated denial of its DS record) is treated as having the records it answers, and a bad, expired or stripped
+   signature, a missing proof or an unreachable resolver refuses the order (`dns` problem) instead of falling back to an unvalidated
+   answer. CAA is re-checked, validated, when the order is finalized.
 2. After the applicant fetches the authorization, the CA sends **one** e-mail to the address from `acme.mail.from`, DKIM-signed
    for its own domain, with `Subject: ACME: <token-part1>` (256 random bits) and `Auto-Submitted: auto-generated; type=acme`.
 3. The applicant replies to the address in `Reply-To` with a body carrying `SHA-256(token-part1 ‖ token-part2 ‖ "." ‖
@@ -110,8 +114,8 @@ This list is what the authors know of; it is not a compliance assessment.
 
 - No audit, no CP/CPS approval process, no policy OIDs (§1).
 - No hardware-protected root, key ceremony, dual control or personnel controls — operator responsibilities outside the software.
-- **CAA is looked up without DNSSEC validation** (Node's resolver cannot validate), and validation is done from one network
-  perspective (no multi-perspective corroboration).
+- CAA is DNSSEC-validated (§4), but from one network perspective only (no multi-perspective corroboration), and the validation is
+  this project's own implementation (`src/lib/dnssec`), tested against a synthetic signed hierarchy rather than audited.
 - Mailbox control is proven by DKIM-authenticated reply only; there is no second validation method (e.g. a random value the
   mailbox owner types in). A domain owner whose mail provider signs mail on behalf of a user without checking who the user is
   therefore controls the mailboxes' validation.

@@ -22,6 +22,8 @@ export const RRTYPE = {
     DNSKEY: 48,
     NSEC3: 50,
     NSEC3PARAM: 51,
+    /** The pseudo type an NSEC record's bitmap uses to say the name does not exist (RFC 9824, compact denial of existence). */
+    NXNAME: 128,
     CAA: 257,
 } as const;
 

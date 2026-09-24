@@ -4,15 +4,7 @@
 ///////////////////////////////////////////////////////////////////////////////
 import { createHash } from "node:crypto";
 import { getServers } from "node:dns";
-import {
-    dsDigestBytes,
-    dsMatches,
-    FLAG_REVOKE,
-    FLAG_ZONE,
-    isSupportedDs,
-    parseDnskey,
-    parseDs,
-} from "./keys.js";
+import { dsDigestBytes, dsMatches, FLAG_REVOKE, FLAG_ZONE, isSupportedDs, parseDnskey, parseDs } from "./keys.js";
 import { DnsName, labelCount, labelsToName, nameToLabels, normalizeName, prependLabel, toFqdn } from "./name.js";
 import {
     CompositeDenial,
@@ -96,11 +88,7 @@ interface ZoneInfo {
 }
 
 /** What asking the parent zone for the DS of a child name established. */
-type DsVerdict =
-    | { kind: "zone"; zone: ZoneInfo }
-    | { kind: "insecure" }
-    | { kind: "same" }
-    | { kind: "nonexistent" };
+type DsVerdict = { kind: "zone"; zone: ZoneInfo } | { kind: "insecure" } | { kind: "same" } | { kind: "nonexistent" };
 
 interface CacheEntry {
     value: unknown;
@@ -250,9 +238,14 @@ export class DnssecResolver {
         }
         let raw: Uint8Array;
         try {
-            raw = await this.transport.query({ name: toFqdn(name), type }, { servers: this.servers, timeoutMs: this.timeoutMs });
+            raw = await this.transport.query(
+                { name: toFqdn(name), type },
+                { servers: this.servers, timeoutMs: this.timeoutMs }
+            );
         } catch (err: unknown) {
-            throw indeterminate(`query for ${name || "."} type ${type} failed: ${err instanceof Error ? err.message : String(err)}`);
+            throw indeterminate(
+                `query for ${name || "."} type ${type} failed: ${err instanceof Error ? err.message : String(err)}`
+            );
         }
         const message: DnsMessage = parseMessage(raw);
         if (!message.qr || message.opcode !== 0) {
@@ -308,7 +301,12 @@ export class DnssecResolver {
      * Fetches and validates a zone's DNSKEY RRset against the DS records (or trust anchors) that vouch for it (RFC 4035
      * section 5.2): a zone key must hash to a usable DS and the whole RRset must be signed by that very key.
      */
-    private async establishZone(ctx: Context, zoneName: DnsName, dsList: DsRecord[], parent?: ZoneInfo): Promise<ZoneInfo> {
+    private async establishZone(
+        ctx: Context,
+        zoneName: DnsName,
+        dsList: DsRecord[],
+        parent?: ZoneInfo
+    ): Promise<ZoneInfo> {
         const label: string = zoneName || ".";
         const message: DnsMessage = await this.fetch(ctx, zoneName, RRTYPE.DNSKEY);
         const records: DnsRecord[] = rrsetOf(message.answer, zoneName, RRTYPE.DNSKEY);
@@ -328,7 +326,9 @@ export class DnssecResolver {
                 keys.push(key);
             }
         }
-        const entries: TrustedKey[] = keys.filter((k) => dsList.some((ds) => isSupportedDs(ds) && dsMatches(zoneName, k, ds)));
+        const entries: TrustedKey[] = keys.filter((k) =>
+            dsList.some((ds) => isSupportedDs(ds) && dsMatches(zoneName, k, ds))
+        );
         if (entries.length === 0) {
             throw bogus(`no DNSKEY of zone ${label} matches its DS record`);
         }
@@ -353,7 +353,9 @@ export class DnssecResolver {
                 failure = err;
             }
         }
-        throw bogus(`the DNSKEY RRset of zone ${label} is not signed by the key its DS vouches for (${failure?.reason})`);
+        throw bogus(
+            `the DNSKEY RRset of zone ${label} is not signed by the key its DS vouches for (${failure?.reason})`
+        );
     }
 
     /**
@@ -420,6 +422,9 @@ export class DnssecResolver {
             if (types.has(RRTYPE.SOA)) {
                 throw bogus(`the proof of no DS at ${name} is the child zone's apex record, not the parent's`);
             }
+            if (types.has(RRTYPE.NXNAME)) {
+                return [{ kind: "nonexistent" }, proof.expiresAt];
+            }
             return [types.has(RRTYPE.NS) ? { kind: "insecure" } : { kind: "same" }, proof.expiresAt];
         }
         const absent = proof.denial.nonexistence(name);
@@ -459,7 +464,15 @@ export class DnssecResolver {
             }
             let validation: RrsetValidation;
             try {
-                validation = validateRrset({ name, type, records: group, sigs, zone: zone.name, keys: zone.keys, now: this.clock() });
+                validation = validateRrset({
+                    name,
+                    type,
+                    records: group,
+                    sigs,
+                    zone: zone.name,
+                    keys: zone.keys,
+                    now: this.clock(),
+                });
             } catch (err: unknown) {
                 if (err instanceof DnssecError && err.kind === "bogus") {
                     notes.push(err.reason);
@@ -581,7 +594,12 @@ export class DnssecResolver {
      * Checks a wildcard expansion (RFC 4035 section 5.3.4, RFC 5155 section 8.8): the exact name must be proven not to exist
      * and the wildcard's parent must be the closest encloser. Returns `insecure` when the proof rests on an opt-out span.
      */
-    private checkWildcard(zone: ZoneInfo, qname: DnsName, validation: RrsetValidation, message: DnsMessage): DnssecStatus {
+    private checkWildcard(
+        zone: ZoneInfo,
+        qname: DnsName,
+        validation: RrsetValidation,
+        message: DnsMessage
+    ): DnssecStatus {
         if (validation.wildcardLabels === undefined) {
             return "secure";
         }
@@ -654,7 +672,8 @@ export class DnssecResolver {
             if (isDelegation(types) && qtype !== RRTYPE.DS) {
                 throw bogus(`${qname} is a delegation point, the proof cannot deny data that lives below it`);
             }
-            return { status: "secure", rdata: [], nxdomain: false };
+            // RFC 9824: an online-signing zone answers NXDOMAIN with an NSEC that lists the pseudo type NXNAME.
+            return { status: "secure", rdata: [], nxdomain: types.has(RRTYPE.NXNAME) };
         }
         const absent = denial.nonexistence(qname);
         if (!absent) {

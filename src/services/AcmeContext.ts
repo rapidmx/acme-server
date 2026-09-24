@@ -6,7 +6,8 @@ import { ObjectDecorators } from "@rapidrest/core";
 import { DatabaseDecorators, HttpRequest, MongoRepository, NetUtils, ObjectFactory } from "@rapidrest/service-core";
 import { AcmeStore, MemoryAcmeStore, RedisAcmeStore, RedisLike } from "../lib/acme/AcmeStore.js";
 import { AcmeUrls } from "../lib/acme/AcmeUrls.js";
-import { DnsChecks, DnsLookup, SystemDnsLookup } from "../lib/acme/Dns.js";
+import { CaaValidator, DnsChecks, DnsLookup, SystemDnsLookup } from "../lib/acme/Dns.js";
+import { DnssecResolver } from "../lib/dnssec/index.js";
 import { NonceService } from "../lib/acme/Nonces.js";
 import { AcmeRateLimiter, ipSubject } from "../lib/acme/RateLimits.js";
 import { ChallengeMailTransport, DnsTxtResolver } from "../lib/mail/index.js";
@@ -28,6 +29,9 @@ import { OrderService } from "./OrderService.js";
 import { RequestAuthenticator } from "./RequestAuthenticator.js";
 const { Config, Init, Logger } = ObjectDecorators;
 const { Redis, Repository } = DatabaseDecorators;
+
+/** The DI token a test registers a stub `CaaValidator` (a DNSSEC-validating CAA resolver) under. */
+export const CAA_VALIDATOR_TOKEN = "CaaValidator";
 
 /** The DI token a deployment (or a test) registers an alternative `DnsLookup` under. */
 export const DNS_LOOKUP_TOKEN = "DnsLookup";
@@ -119,7 +123,12 @@ export class AcmeContext {
         const dnsLookup: DnsLookup = factory.classes.has(DNS_LOOKUP_TOKEN)
             ? await factory.newInstance<DnsLookup>(DNS_LOOKUP_TOKEN, { name: "default" })
             : new SystemDnsLookup(this.settings.dnsServers);
-        this.dns = new DnsChecks(dnsLookup, this.settings.caaIdentities);
+        const caaValidator: CaaValidator | undefined = factory.classes.has(CAA_VALIDATOR_TOKEN)
+            ? await factory.newInstance<CaaValidator>(CAA_VALIDATOR_TOKEN, { name: "default" })
+            : this.settings.dnssecValidation && !factory.classes.has(DNS_LOOKUP_TOKEN)
+              ? new DnssecResolver({ servers: this.settings.dnsServers.length > 0 ? this.settings.dnsServers : undefined })
+              : undefined;
+        this.dns = new DnsChecks(dnsLookup, this.settings.caaIdentities, caaValidator);
 
         this.mailer = factory.classes.has(CHALLENGE_MAIL_TOKEN)
             ? await factory.newInstance<ChallengeMailTransport>(CHALLENGE_MAIL_TOKEN, { name: "default" })

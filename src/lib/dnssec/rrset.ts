@@ -121,7 +121,7 @@ export function canonicalRdata(type: number, rdata: Buffer): Buffer {
 
 /** RFC 1982 serial number arithmetic on 32-bit values: `a <= b`. */
 function serialLte(a: number, b: number): boolean {
-    return ((b - a) >>> 0) < 0x80000000;
+    return (b - a) >>> 0 < 0x80000000;
 }
 
 /**

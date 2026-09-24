@@ -54,6 +54,9 @@ export function assertProductionConfig(config: GuardedConfig, environment: strin
     if (adminSecret !== "" && adminSecret.length < 32) {
         problems.push("acme:admin_secret (env acme__admin_secret) must be at least 32 characters: it can revoke every certificate this CA issued");
     }
+    if (String(config.get("acme:dns:dnssec") ?? "validate").toLowerCase() === "off") {
+        problems.push("acme:dns:dnssec is off: CAA policy must be DNSSEC-validated by a public CA (RFC 8659 §3.1)");
+    }
     if (String(config.get("acme:rate_limits:enabled")) === "false") {
         problems.push("acme:rate_limits:enabled is false: a public CA that sends mail to strangers' addresses must be rate limited");
     }

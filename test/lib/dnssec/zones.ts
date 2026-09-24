@@ -8,7 +8,6 @@ import {
     compareNames,
     isProperSubdomain,
     isSubdomain,
-    labelsToName,
     nameToLabels,
     nameToWire,
     normalizeName,
@@ -17,6 +16,7 @@ import {
 } from "../../../src/lib/dnssec/name.js";
 import { base32hexEncode } from "../../../src/lib/dnssec/nsec.js";
 import { DnssecTransport, DsRecord } from "../../../src/lib/dnssec/types.js";
+import { DnssecResolver, DnssecResolverOptions } from "../../../src/lib/dnssec/validator.js";
 
 /**
  * A synthetic, fully signed DNS hierarchy for tests. It owns real keys, signs real RRsets and answers queries as a
@@ -77,13 +77,19 @@ export function makeKey(kind: KeyKind, flags: number): TestKey {
         }
         case "p256":
         case "p384": {
-            ({ publicKey, privateKey } = generateKeyPairSync("ec", { namedCurve: kind === "p256" ? "P-256" : "P-384" }));
+            ({ publicKey, privateKey } = generateKeyPairSync("ec", {
+                namedCurve: kind === "p256" ? "P-256" : "P-384",
+            }));
             const jwk = publicKey.export({ format: "jwk" });
-            material = Buffer.concat([Buffer.from(jwk.x as string, "base64url"), Buffer.from(jwk.y as string, "base64url")]);
+            material = Buffer.concat([
+                Buffer.from(jwk.x as string, "base64url"),
+                Buffer.from(jwk.y as string, "base64url"),
+            ]);
             break;
         }
         default: {
-            ({ publicKey, privateKey } = generateKeyPairSync(kind));
+            ({ publicKey, privateKey } =
+                kind === "ed25519" ? generateKeyPairSync("ed25519") : generateKeyPairSync("ed448"));
             material = Buffer.from(publicKey.export({ format: "jwk" }).x as string, "base64url");
         }
     }
@@ -266,7 +272,7 @@ export function signRrset(zone: string, key: TestKey, records: RR[], options: Si
 }
 
 /** How a zone proves non-existence. */
-export type DenialKind = "nsec" | "nsec3" | "nsec3-optout" | "unsigned";
+export type DenialKind = "nsec" | "nsec3" | "nsec3-optout" | "compact" | "unsigned";
 
 export interface ZoneSpec {
     name: string;
@@ -274,6 +280,10 @@ export interface ZoneSpec {
     denial?: DenialKind;
     iterations?: number;
     salt?: Buffer;
+    /** TTL of every record the zone makes itself (default 300). */
+    ttl?: number;
+    /** Signature expiration, seconds since the epoch (default: 30 days after T0). */
+    expiration?: number;
 }
 
 interface NsecEntry {
@@ -301,6 +311,8 @@ export class TestZone {
     public dnskeySigners: TestKey[];
     public readonly iterations: number;
     public readonly salt: Buffer;
+    public readonly ttl: number;
+    public readonly expiration: number;
     public readonly rrsets = new Map<string, Map<number, RR[]>>();
     /** RRSIGs by `owner|type`. */
     public readonly sigs = new Map<string, RR[]>();
@@ -313,6 +325,8 @@ export class TestZone {
         this.denial = spec.denial ?? "nsec";
         this.iterations = spec.iterations ?? 0;
         this.salt = spec.salt ?? Buffer.alloc(0);
+        this.ttl = spec.ttl ?? 300;
+        this.expiration = spec.expiration ?? EXPIRATION;
         const kind: KeyKind = spec.kind ?? "p256";
         this.ksk = makeKey(kind, 257);
         this.zsk = makeKey(kind, 256);
@@ -325,7 +339,7 @@ export class TestZone {
     }
 
     /** Adds one record (or several RDATAs) to the zone. */
-    public add(name: string, type: number, rdata: Buffer | Buffer[], ttl = 300): void {
+    public add(name: string, type: number, rdata: Buffer | Buffer[], ttl: number = this.ttl): void {
         const owner: string = name === "@" ? this.name : name;
         const set: Map<number, RR[]> = this.rrsets.get(owner) ?? new Map<number, RR[]>();
         this.rrsets.set(owner, set);
@@ -338,7 +352,7 @@ export class TestZone {
 
     /** A name relative to the zone. */
     public n(label: string): string {
-        return label === "" ? this.name : prependLabel2(label, this.name);
+        return label === "" ? this.name : prependLabel(label, this.name);
     }
 
     private isCut(name: string): boolean {
@@ -376,7 +390,7 @@ export class TestZone {
         this.built = true;
         this.add(this.name, T.SOA, soaRdata(this.name));
         if (!this.rrsets.get(this.name)?.has(T.NS)) {
-            this.add(this.name, T.NS, wireName(prependLabel2("ns1", this.name)));
+            this.add(this.name, T.NS, wireName(prependLabel("ns1", this.name)));
         }
         if (!this.signed) {
             return;
@@ -386,8 +400,13 @@ export class TestZone {
             T.DNSKEY,
             this.keys.map((k) => k.rdata)
         );
-        if (this.denial !== "nsec") {
-            const param: Buffer = Buffer.concat([Buffer.from([1, 0]), u16(this.iterations), Buffer.from([this.salt.length]), this.salt]);
+        if (this.denial === "nsec3" || this.denial === "nsec3-optout") {
+            const param: Buffer = Buffer.concat([
+                Buffer.from([1, 0]),
+                u16(this.iterations),
+                Buffer.from([this.salt.length]),
+                this.salt,
+            ]);
             this.add(this.name, T.NSEC3PARAM, param);
         }
         this.buildChain();
@@ -400,7 +419,7 @@ export class TestZone {
                 const signers: TestKey[] = type === T.DNSKEY ? this.dnskeySigners : [this.zsk];
                 this.sigs.set(
                     `${owner}|${type}`,
-                    signers.map((k) => signRrset(this.name, k, records))
+                    signers.map((k) => signRrset(this.name, k, records, { expiration: this.expiration }))
                 );
             }
         }
@@ -417,13 +436,24 @@ export class TestZone {
     }
 
     private buildChain(): void {
+        if (this.denial === "compact") {
+            return;
+        }
         if (this.denial === "nsec") {
             const owners: string[] = [...this.rrsets.keys()].sort(compareNames);
             this.nsecs = owners.map((owner, i) => {
                 const next: string = owners[(i + 1) % owners.length];
-                const rdata: Buffer = Buffer.concat([wireName(next), encodeBitmap([...this.typesAt(owner), T.RRSIG, T.NSEC])]);
-                const rr: RR = { name: owner, type: T.NSEC, ttl: 300, rdata };
-                return { owner, next, rr, sigs: [signRrset(this.name, this.zsk, [rr])] };
+                const rdata: Buffer = Buffer.concat([
+                    wireName(next),
+                    encodeBitmap([...this.typesAt(owner), T.RRSIG, T.NSEC]),
+                ]);
+                const rr: RR = { name: owner, type: T.NSEC, ttl: this.ttl, rdata };
+                return {
+                    owner,
+                    next,
+                    rr,
+                    sigs: [signRrset(this.name, this.zsk, [rr], { expiration: this.expiration })],
+                };
             });
             for (const e of this.nsecs) {
                 this.sigs.set(`${e.owner}|${T.NSEC}`, e.sigs);
@@ -457,9 +487,13 @@ export class TestZone {
                 next,
                 encodeBitmap(types),
             ]);
-            const owner: string = prependLabel2(base32hexEncode(entry.hash), this.name);
-            const rr: RR = { name: owner, type: T.NSEC3, ttl: 300, rdata };
-            return { hash: entry.hash, rr, sigs: [signRrset(this.name, this.zsk, [rr])] };
+            const owner: string = prependLabel(base32hexEncode(entry.hash), this.name);
+            const rr: RR = { name: owner, type: T.NSEC3, ttl: this.ttl, rdata };
+            return {
+                hash: entry.hash,
+                rr,
+                sigs: [signRrset(this.name, this.zsk, [rr], { expiration: this.expiration })],
+            };
         });
         for (const e of this.nsec3s) {
             this.sigs.set(`${e.rr.name}|${T.NSEC3}`, e.sigs);
@@ -471,7 +505,10 @@ export class TestZone {
     ///////////////////////////////////////////////////////////////////////////
 
     private withSigs(name: string, type: number): RR[] {
-        const records: RR[] = (this.rrsets.get(name)?.get(type) ?? []).map((r) => ({ ...r, rdata: Buffer.from(r.rdata) }));
+        const records: RR[] = (this.rrsets.get(name)?.get(type) ?? []).map((r) => ({
+            ...r,
+            rdata: Buffer.from(r.rdata),
+        }));
         return [...records, ...this.sigsFor(name, type).map((s) => ({ ...s, rdata: Buffer.from(s.rdata) }))];
     }
 
@@ -567,12 +604,16 @@ export class TestZone {
     /** What this zone answers for a query it is authoritative for (delegated names never reach here except DS). */
     public respond(qname: string, qtype: number): TestResponse {
         const existing: Set<string> = this.existing();
-        const authenticated = (records: RR[]): RR[] => (this.signed ? records : records.filter((r) => r.type !== T.RRSIG));
+        const authenticated = (records: RR[]): RR[] =>
+            this.signed ? records : records.filter((r) => r.type !== T.RRSIG);
         const negative = (rcode: number, proof: RR[]): TestResponse => ({
             rcode,
             answer: [],
             authority: this.uniq(authenticated([...this.soa(), ...(this.signed ? proof : [])])),
         });
+        if (this.denial === "compact") {
+            return this.respondCompact(qname, qtype, existing);
+        }
         if (existing.has(qname)) {
             const set: Map<number, RR[]> | undefined = this.rrsets.get(qname);
             if (set?.has(qtype)) {
@@ -584,16 +625,16 @@ export class TestZone {
             return negative(0, this.signed ? this.proveExists(qname) : []);
         }
         const ce: string = this.closestEncloser(qname);
-        const wildcard: string = prependLabel2("*", ce);
+        const wildcard: string = prependLabel("*", ce);
         const wildcardSet: Map<number, RR[]> | undefined = this.rrsets.get(wildcard);
         if (wildcardSet) {
-            const type: number | undefined = wildcardSet.has(qtype) ? qtype : wildcardSet.has(T.CNAME) && qtype !== T.CNAME ? T.CNAME : undefined;
+            const type: number | undefined = wildcardSet.has(qtype)
+                ? qtype
+                : wildcardSet.has(T.CNAME) && qtype !== T.CNAME
+                  ? T.CNAME
+                  : undefined;
             const proof: RR[] =
-                this.denial === "nsec"
-                    ? this.nsecCover(qname)
-                    : this.signed
-                      ? this.nsec3Proof(qname).records
-                      : [];
+                this.denial === "nsec" ? this.nsecCover(qname) : this.signed ? this.nsec3Proof(qname).records : [];
             if (type !== undefined) {
                 const answer: RR[] = this.withSigs(wildcard, type).map((r) => ({ ...r, name: qname }));
                 return { rcode: 0, answer, authority: this.signed ? proof : [] };
@@ -607,7 +648,36 @@ export class TestZone {
         if (this.denial === "nsec") {
             return negative(3, [...this.nsecCover(qname), ...this.nsecCover(wildcard)]);
         }
-        return negative(3, [...this.nsec3Proof(qname).records, ...this.nsec3Cover(wildcard)]);
+        const proof3 = this.nsec3Proof(qname);
+        return negative(3, [...proof3.records, ...this.nsec3Cover(prependLabel("*", proof3.closestEncloser))]);
+    }
+
+    /**
+     * Compact denial of existence (RFC 9824): online signing, every negative answer is NOERROR with an NSEC at the query name whose
+     * next name is the name with a zero label prepended; a name that does not exist has the pseudo type NXNAME in its bitmap.
+     */
+    private respondCompact(qname: string, qtype: number, existing: Set<string>): TestResponse {
+        const set: Map<number, RR[]> | undefined = this.rrsets.get(qname);
+        if (existing.has(qname) && set?.has(qtype)) {
+            return { rcode: 0, answer: this.withSigs(qname, qtype), authority: [] };
+        }
+        if (existing.has(qname) && set?.has(T.CNAME) && qtype !== T.CNAME) {
+            return { rcode: 0, answer: this.withSigs(qname, T.CNAME), authority: [] };
+        }
+        const types: number[] = existing.has(qname)
+            ? [...(set?.keys() ?? []), T.RRSIG, T.NSEC]
+            : [T.RRSIG, T.NSEC, 128];
+        const rr: RR = {
+            name: qname,
+            type: T.NSEC,
+            ttl: this.ttl,
+            rdata: Buffer.concat([Buffer.from([1, 0]), wireName(qname), encodeBitmap(types)]),
+        };
+        return {
+            rcode: 0,
+            answer: [],
+            authority: [...this.soa(), rr, signRrset(this.name, this.zsk, [rr], { expiration: this.expiration })],
+        };
     }
 
     /** The RRset (with its signatures) at a name, for tests that need to tamper with exact records. */
@@ -625,14 +695,23 @@ export class TestZone {
         return this.denial === "nsec" ? this.nsecCover(name) : this.nsec3Cover(name);
     }
 
+    /** The record whose next name (hash) is the given name: what the real chain has just before it. */
+    public proofPreceding(name: string): RR[] {
+        if (this.denial === "nsec") {
+            const entry = this.nsecs.find((e) => e.next === name);
+            return entry ? [entry.rr, ...entry.sigs] : [];
+        }
+        const hash: Buffer = nsec3Hash(name, this.salt, this.iterations);
+        const index: number = this.nsec3s.findIndex((_e, i) =>
+            this.nsec3s[(i + 1) % this.nsec3s.length].hash.equals(hash)
+        );
+        return index < 0 ? [] : [this.nsec3s[index].rr, ...this.nsec3s[index].sigs];
+    }
+
     /** The zone-private NSEC3 hash of a name. */
     public hash(name: string): Buffer {
         return nsec3Hash(name, this.salt, this.iterations);
     }
-}
-
-function prependLabel2(label: string, name: string): string {
-    return name === "" ? label : `${label}.${name}`;
 }
 
 /** How a delegation's DS RRset is made. */
@@ -651,7 +730,11 @@ export class TestWorld implements DnssecTransport {
     /** Every question the resolver asked, in order. */
     public readonly queries: Array<{ name: string; type: number }> = [];
     /** Edits or replaces a response before it is encoded; returning bytes sends those bytes verbatim; throwing fails the query. */
-    public hook?: (q: { name: string; type: number }, response: TestResponse, zone: TestZone | undefined) => Promise<Uint8Array | void> | Uint8Array | void;
+    public hook?: (
+        q: { name: string; type: number },
+        response: TestResponse,
+        zone: TestZone | undefined
+    ) => Promise<Uint8Array | void> | Uint8Array | void;
     /** Whether the encoder compresses names. */
     public compress = true;
 
@@ -663,7 +746,7 @@ export class TestWorld implements DnssecTransport {
 
     /** Delegates `child` from `parent`: NS and (unless unsigned) DS records in the parent. */
     public delegate(parent: TestZone, child: TestZone, options: DelegationOptions = {}): void {
-        parent.add(child.name, T.NS, wireName(prependLabel2("ns1", child.name)));
+        parent.add(child.name, T.NS, wireName(prependLabel("ns1", child.name)));
         if (options.dsRdata) {
             parent.add(child.name, T.DS, options.dsRdata);
             return;
@@ -712,7 +795,9 @@ export class TestWorld implements DnssecTransport {
         const q = { name, type: question.type };
         this.queries.push(q);
         const zone: TestZone | undefined = this.zoneFor(name, question.type);
-        const response: TestResponse = zone ? zone.respond(name, question.type) : { rcode: 2, answer: [], authority: [] };
+        const response: TestResponse = zone
+            ? zone.respond(name, question.type)
+            : { rcode: 2, answer: [], authority: [] };
         const replaced: Uint8Array | void = await this.hook?.(q, response, zone);
         if (replaced) {
             return replaced;
@@ -819,7 +904,13 @@ function writeRecord(w: Writer, rr: RR): void {
 }
 
 /** Encodes a response to `qname`/`qtype` as a real DNS message with an EDNS0 OPT record. */
-export function encodeMessage(qname: string, qtype: number, response: TestResponse, compress = true, id = 0x1234): Buffer {
+export function encodeMessage(
+    qname: string,
+    qtype: number,
+    response: TestResponse,
+    compress = true,
+    id = 0x1234
+): Buffer {
     const w = new Writer(compress);
     const additional: RR[] = response.additional ?? [];
     w.u16(id);
@@ -870,6 +961,12 @@ export interface StandardWorld {
     sha384: TestZone;
     unsupported: TestZone;
     below: TestZone;
+    /** Has a wildcard at its apex level and an empty non-terminal beneath it that the wildcard must not cover. */
+    wc: TestZone;
+    /** NSEC3 with more iterations than the library will compute. */
+    iter: TestZone;
+    /** Online signing with compact denial of existence (NXNAME). */
+    compact: TestZone;
 }
 
 /**
@@ -880,9 +977,19 @@ export interface StandardWorld {
 export function buildStandardWorld(): StandardWorld {
     const world = new TestWorld();
     const root: TestZone = world.add({ name: "", denial: "nsec" });
-    const com: TestZone = world.add({ name: "com", denial: "nsec3-optout", iterations: 3, salt: Buffer.from("aabbccdd", "hex") });
+    const com: TestZone = world.add({
+        name: "com",
+        denial: "nsec3-optout",
+        iterations: 3,
+        salt: Buffer.from("aabbccdd", "hex"),
+    });
     const net: TestZone = world.add({ name: "net", denial: "nsec" });
-    const org: TestZone = world.add({ name: "org", denial: "nsec3", iterations: 12, salt: Buffer.from("aabbccdd", "hex") });
+    const org: TestZone = world.add({
+        name: "org",
+        denial: "nsec3",
+        iterations: 12,
+        salt: Buffer.from("aabbccdd", "hex"),
+    });
     const insecureTld: TestZone = world.add({ name: "insecure", denial: "unsigned" });
     world.delegate(root, com);
     world.delegate(root, net);
@@ -890,7 +997,13 @@ export function buildStandardWorld(): StandardWorld {
     world.delegate(root, insecureTld, { ds: "none" });
 
     const example: TestZone = world.add({ name: "example.com", denial: "nsec" });
-    const p384: TestZone = world.add({ name: "p384.com", kind: "p384", denial: "nsec3", iterations: 1, salt: Buffer.from("00ff", "hex") });
+    const p384: TestZone = world.add({
+        name: "p384.com",
+        kind: "p384",
+        denial: "nsec3",
+        iterations: 1,
+        salt: Buffer.from("00ff", "hex"),
+    });
     const ed25519: TestZone = world.add({ name: "ed25519.com", kind: "ed25519", denial: "nsec3-optout" });
     const ed448: TestZone = world.add({ name: "ed448.com", kind: "ed448", denial: "nsec" });
     const rsa: TestZone = world.add({ name: "rsa.com", kind: "rsa256", denial: "nsec" });
@@ -904,7 +1017,10 @@ export function buildStandardWorld(): StandardWorld {
     const secureOrg: TestZone = world.add({ name: "secure.org", denial: "nsec3", iterations: 2 });
     const unsignedOrg: TestZone = world.add({ name: "unsigned.org", denial: "unsigned" });
     const below: TestZone = world.add({ name: "below.example.insecure", denial: "unsigned" });
-    for (const child of [example, p384, ed25519, ed448, rsa, rsa512, roll]) {
+    const wc: TestZone = world.add({ name: "wc.com", denial: "nsec" });
+    const iter: TestZone = world.add({ name: "iter.com", denial: "nsec3", iterations: 501 });
+    const compact: TestZone = world.add({ name: "compact.com", denial: "compact" });
+    for (const child of [example, p384, ed25519, ed448, rsa, rsa512, wc, iter, compact]) {
         world.delegate(com, child);
     }
     world.delegate(com, sha384, { ds: "sha384" });
@@ -926,15 +1042,32 @@ export function buildStandardWorld(): StandardWorld {
     const newZsk: TestKey = makeKey("p256", 256);
     roll.keys = [roll.ksk, newKsk, roll.zsk, newZsk];
     roll.dnskeySigners = [roll.ksk, newKsk];
-    com.rrsets.get("roll.com")?.delete(T.DS);
     world.delegate(com, roll, { dsKeys: [newKsk] });
 
-    for (const zone of [example, p384, ed25519, ed448, rsa, rsa512, unsignedCom, roll, sha384, unsupported, secureNet, unsignedNet, secureOrg, unsignedOrg, below]) {
+    for (const zone of [
+        example,
+        p384,
+        ed25519,
+        ed448,
+        rsa,
+        rsa512,
+        wc,
+        iter,
+        compact,
+        unsignedCom,
+        roll,
+        sha384,
+        unsupported,
+        secureNet,
+        unsignedNet,
+        secureOrg,
+        unsignedOrg,
+        below,
+    ]) {
         zone.add("@", T.CAA, caaRdata(0, "issue", `ca.${zone.name}`));
         zone.add(zone.n("host"), T.A, aRdata("192.0.2.1"));
     }
     world.delegate(insecureTld, below, { ds: "none" });
-    insecureTld.add("example.insecure", T.NS, wireName("ns1.example.insecure"));
     insecureTld.add("@", T.CAA, caaRdata(0, "issue", "ca.insecure"));
 
     // example.com: a wildcard, an empty non-terminal, CNAMEs (chained, cross-zone, to an unsigned zone, looping) and a name with a TXT.
@@ -952,6 +1085,9 @@ export function buildStandardWorld(): StandardWorld {
     example.add("loop2.example.com", T.CNAME, wireName("loop1.example.com"));
     example.add("mixed.example.com", T.CNAME, wireName("Host.Example.COM", true));
     example.add("txt.example.com", T.TXT, txtRdata("hello"));
+    example.add("hinfo.example.com", 13, Buffer.from([1, 65, 1, 66]));
+    wc.add("*.wc.com", T.TXT, txtRdata("top"));
+    wc.add("sub.mid.wc.com", T.A, aRdata("192.0.2.4"));
     example.add("mx.example.com", T.MX, Buffer.concat([u16(10), wireName("host.example.com")]));
     // A signed CNAME at the apex of the delegation-free part, and a name that has both a wildcard sibling and data.
     example.add("a.wild.example.com", T.A, aRdata("192.0.2.3"));
@@ -983,7 +1119,20 @@ export function buildStandardWorld(): StandardWorld {
         sha384,
         unsupported,
         below,
+        wc,
+        iter,
+        compact,
     };
 }
 
-export { labelsToName };
+/** A resolver wired to a test world: its transport, anchors and clock, without caching unless asked. */
+export function makeResolver(world: TestWorld, overrides: Partial<DnssecResolverOptions> = {}): DnssecResolver {
+    return new DnssecResolver({
+        transport: world,
+        trustAnchors: world.anchors(),
+        now: () => T0,
+        servers: ["192.0.2.53"],
+        cacheSeconds: 0,
+        ...overrides,
+    });
+}

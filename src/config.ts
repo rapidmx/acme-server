@@ -121,6 +121,9 @@ conf.defaults({
         dns: {
             // Extra resolvers; empty = the system's.
             servers: [],
+            // "validate": CAA answers are DNSSEC-validated in-process against the root trust anchors (a broken or stripped signature
+            // refuses the order); "off": the resolver's unvalidated answer is used. Refused outside development.
+            dnssec: "validate",
         },
         rate_limits: {
             enabled: true,

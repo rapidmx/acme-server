@@ -134,6 +134,6 @@ an in-memory MongoDB), interop with the independent `acme-client` package driven
 agent), and a smoke run of the *built* server as a real process (real DNS MX/CAA lookups, a genuine
 DKIM-signed challenge through a real SMTP relay stub, the SMTP receiver, the production config guard).
 Findings worth remembering: `example.com` publishes a null MX (RFC 7505) so the CA correctly refuses it
-against real DNS; use `gmail.com`-like domains in real-DNS smoke tests. Not verified: a real Redis, a real
+against real DNS; use `gmail.com`-like domains in real-DNS smoke tests. DNSSEC: CAA goes through `DnsChecks` + `CaaValidator` (`lib/dnssec` `DnssecResolver`, fail closed; `bogus`/`indeterminate` both -> `dns` problem); it is skipped when a `DnsLookup` is registered in DI (tests) unless a `CaaValidator` is registered too (`startCa({}, { dnssec: true })`). Not verified: a real Redis, a real
 OpenBao Transit, a real inbound MTA/DKIM signature from a live mail server, a real Outlook/Thunderbird trust
 import, Linux/POSIX file modes (developed on Windows).
