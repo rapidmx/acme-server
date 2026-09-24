@@ -8,7 +8,8 @@ import { AcmeContext } from "../services/AcmeContext.js";
 const { Inject, Logger } = ObjectDecorators;
 
 /**
- * The CA's housekeeping, every ten minutes: authorizations and orders whose time is up are marked expired, and every issuer's
+ * The CA's housekeeping, every ten minutes: authorizations and orders whose time is up are marked expired, the expiry reminders
+ * that have come due are e-mailed to the account contacts, and every issuer's
  * CRL is regenerated when it is older than `acme.ca.crl_refresh_hours` (a CRL that goes stale would make relying parties
  * treat every certificate as unverifiable).
  *
@@ -39,6 +40,15 @@ export class MaintenanceJob extends BackgroundService {
             }
         } catch (err) {
             this.logger.error("Expiring old authorizations and orders failed.");
+            this.logger.debug(err);
+        }
+        try {
+            const sent = await this.ctx.reminders.run();
+            if (sent.certificates > 0) {
+                this.logger.info(`Sent ${sent.mails} expiry reminder e-mail(s) about ${sent.certificates} certificate(s).`);
+            }
+        } catch (err) {
+            this.logger.error("Sending the expiry reminders failed.");
             this.logger.debug(err);
         }
         try {

@@ -72,6 +72,8 @@ acme.mail.inbound.http_secret  bearer secret for POST /internal/mail/inbound (un
 acme.mail.dkim_alignment       strict (d= equals From domain, RFC 8823) | relaxed (d= may be a parent of it)
 acme.rate_limits.enabled       true
 acme.rate_limits.overrides     [{ "limit": "<limit name>", "subject": "<account uid | address | domain | normalized ip>", "count": n, "period_seconds": n, "burst": n }]
+acme.reminders.enabled         true                         expiry reminders to the account contacts (see "Expiry reminders")
+acme.reminders.batch_size      500                          the most certificates one maintenance run (every 10 minutes) sends reminders for
 acme.max_identifiers           1
 acme.metrics_secret            bearer secret of GET /metrics (unset = 404)
 acme.admin_secret              bearer secret of the operator API /admin (unset = 404; >= 32 characters outside development)
@@ -179,6 +181,41 @@ issuance rate limits (unless the order `replaces` a certificate of the same acco
 are exempt as in Let's Encrypt), re-check CAA, sign, store the certificate, mark the order `valid` and answer with it.
 Downloaded as `application/pem-certificate-chain` (leaf + issuing CA chain excluding the root).
 
+## Expiry reminders
+
+The CA e-mails the holder of an ACME account - the `mailto:` contacts of the account, not the certificate's own mailbox - when a
+certificate is about to expire or has expired unrenewed. The schedule is relative to the certificate's `notAfter`:
+
+| Milestone | Sent |
+| --- | --- |
+| 1 week before | `notAfter` - 7 d |
+| 3 days before | `notAfter` - 3 d |
+| 1 day before | `notAfter` - 1 d |
+| the day of | at `notAfter` (the moment it expires) |
+| 1 day after | `notAfter` + 1 d |
+| 1 week after | `notAfter` + 7 d |
+
+How it works (`lib/acme/Reminders.ts`, `lib/mail/ReminderMail.ts`, `services/ReminderService.ts`, run by `MaintenanceJob` every ten
+minutes):
+
+- Every certificate carries `reminderStage` (the next milestone) and `nextReminderAt` (indexed), set when it is issued, so a run
+  touches only what is due. Milestones that fall before a certificate's own start (a 3-day certificate has no "1 week before") are
+  left out. Certificates issued before this existed are scheduled on first run.
+- A milestone is **claimed** with one conditional update before anything is sent, so several replicas never send it twice. If every
+  recipient fails (relay down) the claim is released and retried an hour later; a reminder that is more than a day late is dropped
+  rather than sent ("expires in 3 days" arriving after it expired is worse than nothing). After a longer outage only the latest
+  milestone that has come is sent, not a burst of the missed ones.
+- Nothing is sent, and the milestone is used up, when the certificate is **revoked**, when a **newer valid certificate for the same
+  address and type** outlives it (it was renewed - this applies to the "before" reminders too, since the point is to say action
+  is needed), or when the account is deactivated/suspended or has no usable contact.
+- One e-mail per contact lists everything of that account that is due in the run (at most 50 certificates per e-mail), so an
+  account that manages many mailboxes is not flooded. The message is plain text from `acme.mail.from` (DKIM-signed with the
+  challenge mail's key), `Auto-Submitted: auto-generated`, no Reply-To, and says why it arrived and how to stop it (remove the
+  contact from the account).
+- Anyone can name any address as an account contact, so each contact address has a daily budget
+  (`reminderMailsPerContactDay`, 48/day, all accounts together; over it the milestone is dropped). Switch the feature off with
+  `acme.reminders.enabled: false`.
+
 ## Rate limits (Let's Encrypt style, GCRA token buckets)
 
 Every limit is `burst` tokens refilled at `count / period`; a rejected request carries `Retry-After` (seconds) and
@@ -199,6 +236,7 @@ Every limit is `burst` tokens refilled at `count / period`; a rejected request c
 | Challenge e-mails per account | account | 60 / h |
 | Challenge e-mails per source IP | ip | 120 / h |
 | Finalize requests | account | 20 / h (burst 10): a finalize does signature checks and a signature |
+| Expiry reminder e-mails per contact address | email | 48 / day (burst 24), all accounts together |
 
 The last three protect third parties: this CA sends mail to addresses a stranger names, so it must not become a
 mail-bomb amplifier. `overrides` (config) raise or lower a specific key.
@@ -291,7 +329,8 @@ export function derToPem(der: Uint8Array, label: string): string; export functio
 ```ts
 // ChallengeMailer.ts
 export interface ChallengeMail { to: string; tokenPart1: string; from: string; replyTo: string; messageId?: string; }
-export interface ChallengeMailTransport { send(mail: ChallengeMail): Promise<{ messageId: string }>; }
+export interface NoticeMail { to: string; from: string; subject: string; text: string; messageId?: string; }
+export interface ChallengeMailTransport { send(mail: ChallengeMail): Promise<{ messageId: string }>; sendNotice(mail: NoticeMail): Promise<{ messageId: string }>; }
 export class SmtpChallengeMailer implements ChallengeMailTransport { constructor(o: { smtp: { url?: string; host?: string; port?: number; secure?: boolean; auth?: { user: string; pass: string }; ignoreTLS?: boolean }; dkim?: { domain: string; selector: string; privateKey: string }; hostname?: string }); }
 export class MemoryChallengeMailer implements ChallengeMailTransport { readonly sent: Array<ChallengeMail & { messageId: string; subject: string; raw: string }>; }
 export function challengeSubject(tokenPart1: string): string;         // "ACME: <token-part1>"

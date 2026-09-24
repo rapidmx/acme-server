@@ -28,6 +28,7 @@ export type LimitName =
     | "challengeMailsPerDomainHour"
     | "challengeMailsPerAccountHour"
     | "challengeMailsPerIpHour"
+    | "reminderMailsPerContactDay"
     | "finalizesPerAccount"
     | "adminAuthFailuresPerIp";
 
@@ -72,6 +73,9 @@ export const DEFAULT_LIMITS: Readonly<Record<LimitName, LimitDefinition>> = {
     challengeMailsPerDomainHour: { scope: "domain", count: 600, periodSeconds: HOUR, burst: 600, anchor: "challenge-e-mails-per-domain", what: "verification e-mails to addresses at this domain" },
     challengeMailsPerAccountHour: { scope: "account", count: 60, periodSeconds: HOUR, burst: 60, anchor: "challenge-e-mails-per-account", what: "verification e-mails from this account" },
     challengeMailsPerIpHour: { scope: "ip", count: 120, periodSeconds: HOUR, burst: 120, anchor: "challenge-e-mails-per-ip-address", what: "verification e-mails caused from this IP address" },
+    // An account's contact address is whatever its holder typed, so a stranger's address can be named: this caps what a flood of
+    // accounts could make the reminders send to it (one e-mail per account per run already lists everything that is due).
+    reminderMailsPerContactDay: { scope: "email", count: 48, periodSeconds: DAY, burst: 24, anchor: "reminder-e-mails-per-contact-address", what: "expiry reminder e-mails to this address" },
     adminAuthFailuresPerIp: { scope: "ip", count: 20, periodSeconds: HOUR, burst: 10, anchor: "operator-api-authentication-failures", what: "failed operator API authentications from this IP address" },
     finalizesPerAccount: { scope: "account", count: 20, periodSeconds: HOUR, burst: 10, anchor: "finalize-requests-per-account", what: "finalize requests from this account" },
 };

@@ -13,6 +13,7 @@ import { ariCertId, fromB64url, issueLeafCertificate, Issuer, IssuedCertificate,
 import { AcmeAccount } from "../models/AcmeAccount.js";
 import { AcmeCertificate } from "../models/AcmeCertificate.js";
 import type { AcmeOrder, CertificateTypeName } from "../models/AcmeOrder.js";
+import { firstReminder } from "../lib/acme/Reminders.js";
 import { isDuplicateKey, normalizeSerial } from "../lib/acme/Util.js";
 import type { AcmeContext } from "./AcmeContext.js";
 
@@ -89,6 +90,7 @@ export class CertificateService {
                 sha256Fingerprint: issued.sha256Fingerprint,
                 spkiSha256: o.csr.spkiSha256,
                 status: "valid",
+                ...this.reminderSchedule(issued.notBefore, issued.notAfter),
                 dateCreated: now,
             });
             try {
@@ -103,6 +105,15 @@ export class CertificateService {
             }
         }
         throw AcmeProblem.internal();
+    }
+
+    /** The first expiry reminder of a certificate: which one and when (nothing when reminders are off). */
+    public reminderSchedule(notBefore: Date, notAfter: Date): { reminderStage?: number; nextReminderAt?: Date } {
+        if (!this.ctx.settings.remindersEnabled) {
+            return {};
+        }
+        const first = firstReminder(notBefore, notAfter);
+        return { reminderStage: first.stage, ...(first.dueAt ? { nextReminderAt: first.dueAt } : {}) };
     }
 
     /** The certificate chain to send a client: the certificate, then the CAs up to (not including) the root. */

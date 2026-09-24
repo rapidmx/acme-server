@@ -147,6 +147,16 @@ export class AcmeSettings {
         return this.str("acme:dns:dnssec", "validate").toLowerCase() !== "off";
     }
 
+    /** Whether the account holders are sent expiry reminders (default: yes). */
+    public get remindersEnabled(): boolean {
+        return this.bool("reminders:enabled", true);
+    }
+
+    /** The most certificates one maintenance run sends reminders for. */
+    public get reminderBatchSize(): number {
+        return Math.max(1, Math.floor(this.num("reminders:batch_size", 500)));
+    }
+
     public get rateLimitsEnabled(): boolean {
         return this.bool("rate_limits:enabled", true);
     }

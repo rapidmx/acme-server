@@ -125,6 +125,12 @@ conf.defaults({
             // refuses the order); "off": the resolver's unvalidated answer is used. Refused outside development.
             dnssec: "validate",
         },
+        reminders: {
+            // Expiry reminders to the account contacts: 1 week, 3 days and 1 day before, on the day, and 1 day and 1 week after.
+            enabled: true,
+            // The most certificates one run (every ten minutes) picks up.
+            batch_size: 500,
+        },
         rate_limits: {
             enabled: true,
             overrides: [],

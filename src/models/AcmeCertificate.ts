@@ -87,6 +87,15 @@ export class AcmeCertificate extends SimpleMongoEntity {
     public revokedBy?: string;
 
     @Column()
+    @Description("The next expiry reminder to consider (an index into the reminder schedule); `REMINDER_MILESTONES.length` when done.")
+    public reminderStage?: number;
+
+    @Column()
+    @Index()
+    @Description("When the next expiry reminder is due; absent once the schedule is finished.")
+    public nextReminderAt?: Date;
+
+    @Column()
     public dateCreated: Date = new Date();
 
     constructor(other?: Partial<AcmeCertificate>) {

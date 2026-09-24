@@ -19,6 +19,7 @@ import { AcmeCrl } from "../models/AcmeCrl.js";
 import { AcmeOrder } from "../models/AcmeOrder.js";
 import { AccountService } from "./AccountService.js";
 import { AdminService } from "./AdminService.js";
+import { ReminderService } from "./ReminderService.js";
 import { AcmeSettings } from "./AcmeSettings.js";
 import { CertificateService } from "./CertificateService.js";
 import { ChallengeService } from "./ChallengeService.js";
@@ -93,6 +94,7 @@ export class AcmeContext {
     public crls!: CrlService;
     public ocsp!: OcspService;
     public admin!: AdminService;
+    public reminders!: ReminderService;
 
     /** `true` once `init()` completed; `false` means the CA must not serve. */
     public ready: boolean = false;
@@ -153,6 +155,7 @@ export class AcmeContext {
         this.challenges = new ChallengeService(this);
         this.ocsp = new OcspService(this);
         this.admin = new AdminService(this);
+        this.reminders = new ReminderService(this);
         this.ready = true;
     }
 

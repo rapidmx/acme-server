@@ -36,6 +36,34 @@ export interface ChallengeMailTransport {
      * applicant will quote in `In-Reply-To`.
      */
     send(mail: ChallengeMail): Promise<{ messageId: string }>;
+
+    /**
+     * Sends one plain-text notice (a certificate expiry reminder), DKIM-signed like the challenge e-mail.
+     *
+     * @returns The Message-ID the message carries.
+     */
+    sendNotice(mail: NoticeMail): Promise<{ messageId: string }>;
+}
+
+/** One automated plain-text message that is not an RFC 8823 challenge: today, the certificate expiry reminders. */
+export interface NoticeMail {
+    /** The recipient (a plain mailbox; the local part may be internationalized). */
+    to: string;
+    /** The From address, in the DKIM signing domain. */
+    from: string;
+    /** One line, at most 200 characters, no control characters. */
+    subject: string;
+    /** The body, plain text, any line endings. */
+    text: string;
+    /** An explicit Message-ID; generated in the From domain when absent. */
+    messageId?: string;
+}
+
+/** A notice message, composed but not sent. */
+export interface ComposedNotice {
+    raw: Buffer;
+    /** The Message-ID header value, with angle brackets. */
+    messageId: string;
 }
 
 /** DKIM signing material for the challenge mail (RFC 8823: the challenge e-mail MUST be DKIM-signed). */
@@ -196,6 +224,75 @@ function validateDkim(dkim: ChallengeDkimOptions): void {
     }
 }
 
+/** A nodemailer transport that only composes (and DKIM-signs) messages into a buffer. */
+function createComposer(o: { dkim?: ChallengeDkimOptions; hostname?: string }): Transporter {
+    return nodemailer.createTransport({
+        streamTransport: true,
+        buffer: true,
+        newline: "windows",
+        name: o.hostname,
+        ...(o.dkim
+            ? {
+                  dkim: {
+                      domainName: o.dkim.domain,
+                      keySelector: o.dkim.selector,
+                      privateKey: o.dkim.privateKey,
+                      headerFieldNames: SIGNED_HEADERS,
+                  },
+              }
+            : {}),
+    } as any);
+}
+
+/**
+ * Whether `value` is an address this CA is willing to send mail to (the same check every outbound message goes through), so a
+ * caller can drop an unusable address up front instead of treating the refusal as a delivery failure.
+ */
+export function isDeliverableMailbox(value: unknown): boolean {
+    try {
+        requireMailbox(value, "address", true);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+const SUBJECT_PATTERN: RegExp = /^[^\p{C}]{1,200}$/u;
+const MAX_NOTICE_TEXT = 50_000;
+
+/**
+ * Builds a notice message: validates every input (recipient and sender as for the challenge e-mail, a one-line subject, a body
+ * without NUL characters), composes it with nodemailer and DKIM-signs it. Headers: From, To, Subject, Message-ID, Date,
+ * MIME-Version, `Auto-Submitted: auto-generated` and a text/plain body. There is deliberately no Reply-To: nobody reads replies.
+ *
+ * @throws On any invalid input - nothing is composed in that case.
+ */
+export async function composeNoticeMessage(mail: NoticeMail, o: { dkim?: ChallengeDkimOptions; hostname?: string } = {}): Promise<ComposedNotice> {
+    const from: string = requireMailbox(mail.from, "from");
+    const to: string = requireMailbox(mail.to, "to", true);
+    if (typeof mail.subject !== "string" || !SUBJECT_PATTERN.test(mail.subject)) {
+        throw new Error("Invalid subject: one line of at most 200 characters without control characters.");
+    }
+    if (typeof mail.text !== "string" || mail.text.length === 0 || mail.text.length > MAX_NOTICE_TEXT || mail.text.includes(String.fromCharCode(0))) {
+        throw new Error("Invalid text.");
+    }
+    const fromDomain: string = domainOf(from);
+    const messageId: string = mail.messageId !== undefined ? requireMessageId(mail.messageId) : `<${randomBytes(16).toString("hex")}@${fromDomain}>`;
+    if (o.dkim && fromDomain !== o.dkim.domain.toLowerCase() && !fromDomain.endsWith(`.${o.dkim.domain.toLowerCase()}`)) {
+        throw new Error("The DKIM signing domain is neither the From domain nor a parent of it.");
+    }
+    const info: any = await createComposer(o).sendMail({
+        from,
+        to,
+        subject: mail.subject,
+        messageId,
+        headers: { "Auto-Submitted": "auto-generated" },
+        text: mail.text,
+        envelope: { from, to: [to] },
+    });
+    return { raw: info.message as Buffer, messageId };
+}
+
 /**
  * Builds the challenge message: validates every input, composes it with nodemailer and DKIM-signs it.
  *
@@ -226,22 +323,7 @@ export async function composeChallengeMessage(
         throw new Error("The DKIM signing domain is neither the From domain nor a parent of it.");
     }
 
-    const composer: Transporter = nodemailer.createTransport({
-        streamTransport: true,
-        buffer: true,
-        newline: "windows",
-        name: o.hostname,
-        ...(o.dkim
-            ? {
-                  dkim: {
-                      domainName: o.dkim.domain,
-                      keySelector: o.dkim.selector,
-                      privateKey: o.dkim.privateKey,
-                      headerFieldNames: SIGNED_HEADERS,
-                  },
-              }
-            : {}),
-    } as any);
+    const composer: Transporter = createComposer(o);
 
     const info: any = await composer.sendMail({
         from,
@@ -311,6 +393,20 @@ export class SmtpChallengeMailer implements ChallengeMailTransport {
         return { messageId: composed.messageId };
     }
 
+    /**
+     * Composes, signs and relays one notice.
+     *
+     * @throws On invalid input, or when the relay refuses or cannot be reached.
+     */
+    public async sendNotice(mail: NoticeMail): Promise<{ messageId: string }> {
+        const composed: ComposedNotice = await composeNoticeMessage(mail, { dkim: this.dkim, hostname: this.hostname });
+        const info: any = await this.transporter.sendMail({ envelope: { from: mail.from, to: [mail.to] }, raw: composed.raw });
+        if (Array.isArray(info?.rejected) && info.rejected.length > 0) {
+            throw new Error("The mail relay rejected the recipient of the notice.");
+        }
+        return { messageId: composed.messageId };
+    }
+
     /** Releases the transporter's resources (idle sockets); the mailer must not be used afterwards. */
     public close(): void {
         this.transporter.close();
@@ -326,6 +422,10 @@ export class SmtpChallengeMailer implements ChallengeMailTransport {
 export class MemoryChallengeMailer implements ChallengeMailTransport {
     /** Every message accepted so far, oldest first. */
     public readonly sent: Array<ChallengeMail & { messageId: string; subject: string; raw: string }> = [];
+    /** Every notice accepted so far, oldest first. */
+    public readonly notices: Array<NoticeMail & { messageId: string; raw: string }> = [];
+    /** Set by a test to make `sendNotice()` fail (a relay that is down): every recipient in it is refused. */
+    public failNoticesTo: Set<string> = new Set();
 
     private readonly dkim?: ChallengeDkimOptions;
     private readonly hostname?: string;
@@ -350,6 +450,16 @@ export class MemoryChallengeMailer implements ChallengeMailTransport {
             subject: composed.subject,
             raw: composed.raw.toString("utf8"),
         });
+        return { messageId: composed.messageId };
+    }
+
+    /** Validates and composes the notice exactly as the SMTP mailer would, then records it instead of sending. */
+    public async sendNotice(mail: NoticeMail): Promise<{ messageId: string }> {
+        const composed: ComposedNotice = await composeNoticeMessage(mail, { dkim: this.dkim, hostname: this.hostname });
+        if (this.failNoticesTo.has(mail.to.toLowerCase())) {
+            throw new Error("The mail relay could not be reached (simulated).");
+        }
+        this.notices.push({ ...mail, messageId: composed.messageId, raw: composed.raw.toString("utf8") });
         return { messageId: composed.messageId };
     }
 }

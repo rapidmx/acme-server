@@ -108,6 +108,11 @@ For a CA at `acme.example.com` with the default addresses, published in the zone
 Also make sure the outbound relay's IP has a matching reverse DNS record (that is the relay's business, but a missing PTR is
 the most common reason challenge e-mails land in spam).
 
+The same relay and DKIM key also send the **expiry reminders** (1 week, 3 days and 1 day before a certificate expires, the day
+it does, and 1 day and 1 week after if it was not renewed) to the `mailto:` contacts of the ACME account that holds it - so the
+account needs a contact (RapidMX's enrollment registers one). Nothing to configure; `acme.reminders.enabled: false` (chart:
+`extraEnv: acme__reminders__enabled: "false"`) switches them off. See docs/ARCHITECTURE.md, "Expiry reminders".
+
 Applicants' domains are checked too: a domain that publishes a CAA `issuemail` record must name one of
 `acme.caa_identities` (default `["rapidmx.io"]`; set it to **your** operator identity, chart value `acme.caaIdentities`), and
 must be able to receive mail (the CA looks up its MX record).

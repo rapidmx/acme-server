@@ -37,13 +37,17 @@ class LocalDns {
     }
 
     public async start(): Promise<void> {
+        let lastError = "";
         for (let attempt = 0; attempt < 20; attempt++) {
             const udp: Socket = createSocket("udp4");
             await new Promise<void>((resolve) => udp.bind(0, "127.0.0.1", resolve));
             const port: number = udp.address().port;
             const tcp: Server = createServer((socket) => this.onTcp(socket));
             const listening: boolean = await new Promise<boolean>((resolve) => {
-                tcp.once("error", () => resolve(false));
+                tcp.once("error", (err: NodeJS.ErrnoException) => {
+                    lastError = `${err.code ?? err.message} on port ${port}`;
+                    resolve(false);
+                });
                 tcp.listen(port, "127.0.0.1", () => resolve(true));
             });
             if (!listening) {
@@ -58,7 +62,7 @@ class LocalDns {
             });
             return;
         }
-        throw new Error("no free port for the local DNS server");
+        throw new Error(`no free port for the local DNS server (last error: ${lastError})`);
     }
 
     private async onUdp(msg: Buffer, port: number, address: string): Promise<void> {

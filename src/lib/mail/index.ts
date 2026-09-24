@@ -5,3 +5,4 @@
 export * from "./ChallengeMailer.js";
 export * from "./InboundReply.js";
 export * from "./SmtpReceiver.js";
+export * from "./ReminderMail.js";

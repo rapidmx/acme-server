@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
 import { readFileSync } from "fs";
-import { ChallengeMail, ChallengeMailTransport, MemoryChallengeMailer, SmtpChallengeMailer } from "../lib/mail/index.js";
+import { ChallengeMail, ChallengeMailTransport, MemoryChallengeMailer, NoticeMail, SmtpChallengeMailer } from "../lib/mail/index.js";
 import type { SettingsSource } from "./AcmeSettings.js";
 
 /**
@@ -26,6 +26,11 @@ export class ConfiguredChallengeMailer implements ChallengeMailTransport {
     public async send(mail: ChallengeMail): Promise<{ messageId: string }> {
         this.delegate ??= this.build();
         return await this.delegate.send(mail);
+    }
+
+    public async sendNotice(mail: NoticeMail): Promise<{ messageId: string }> {
+        this.delegate ??= this.build();
+        return await this.delegate.sendNotice(mail);
     }
 
     private build(): ChallengeMailTransport {

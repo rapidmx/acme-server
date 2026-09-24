@@ -27,6 +27,7 @@ client that speaks RFC 8823 works (it is tested against the independent [`acme-c
 | **Rate limits** | Let's Encrypt-style token buckets (GCRA in Redis, in memory as a fallback) with `Retry-After` and `rateLimited` problems that link to `/rate-limits`; plus limits that protect the *recipients* of verification e-mails |
 | **Trust endpoints** | Issuer certificates, trust anchors, chains, JWKs, CRL, OCSP, certificate look-up by serial — see below |
 | **Keys** | Local (optionally passphrase-encrypted) PKCS#8 or OpenBao/Vault Transit (the key never enters the process); the root belongs offline |
+| **Reminders** | The account's contacts are e-mailed 1 week, 3 days and 1 day before a certificate expires, the day it does, and 1 day and 1 week after if it was not renewed (none once renewed or revoked); one e-mail per contact lists everything due |
 | **Mail** | Outbound through any SMTP relay with DKIM; inbound on the CA's own SMTP listener or through an HTTP ingest route behind Postfix/SES |
 | **Stack** | RapidREST (uWebSockets), MongoDB, Redis, Node ≥ 24 |
 
