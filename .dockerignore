@@ -1,0 +1,30 @@
+# Only src/, scripts/, the manifests and the compiler/linter configs are copied into the image (see Dockerfile), so this list
+# keeps the build context small and stops local state leaking into it.
+.claude
+.git
+.github
+.vscode
+.yarn/cache
+.yarn/install-state.gz
+node_modules
+dist
+coverage
+junit.xml
+*.log
+tmp-*
+
+# Local secrets and state - never baked into an image. `yarn ca:init` writes the development CA (private keys!) to ./data/ca.
+.env
+.env.*
+data
+passwords
+profiles
+
+# Not needed to build or run.
+docs
+helm
+test
+docker-compose*.yml
+Dockerfile
+.dockerignore
+*.md

@@ -1,0 +1,94 @@
+{{- /*
+The service's MongoDB and (optional) Redis connections, and the passwords of the bundled ones.
+
+The bundled databases are given a password from the <release>-datastore-auth Secret below (their `auth.existingSecret`), which
+this chart generates once and keeps across upgrades - the same way as the bearer secrets in secrets.yaml. Doing it here rather
+than reading the subcharts' own Secret means the connection strings can be built on the very first install, and both ends see
+the same value because it is computed once, in this file.
+*/ -}}
+{{- $release := .Release.Name -}}
+{{- $mongoHost := include "acme.subchartFullname" (dict "name" "mongodb" "values" .Values.mongodb "context" $) -}}
+{{- $redisHost := printf "%s-master" (include "acme.subchartFullname" (dict "name" "redis" "values" .Values.redis "context" $)) -}}
+{{- $authName := printf "%s-datastore-auth" $release -}}
+
+{{- $mongoAuth := and .Values.mongodb.create .Values.mongodb.auth.enabled -}}
+{{- $redisAuth := and .Values.redis.create .Values.redis.auth.enabled -}}
+{{- if or $mongoAuth $redisAuth -}}
+{{-   if or (and $mongoAuth (ne (tpl .Values.mongodb.auth.existingSecret .) $authName)) (and $redisAuth (ne (tpl .Values.redis.auth.existingSecret .) $authName)) -}}
+{{-     fail (printf "mongodb.auth.existingSecret and redis.auth.existingSecret must stay at their default, %q: this chart generates that Secret and builds the connection strings from it. To use a MongoDB or Redis of your own, set mongodb.create=false and mongodb.url (redis.create=false and redis.url)." $authName) -}}
+{{-   end -}}
+{{- end -}}
+
+{{- $existing := (lookup "v1" "Secret" .Release.Namespace $authName) | default dict -}}
+{{- $stored := (get $existing "data") | default dict -}}
+{{- $generated := list -}}
+{{- if and $mongoAuth (not .Values.mongodb.auth.rootPassword) -}}
+{{-   $generated = append $generated "mongodb.auth.rootPassword" -}}
+{{- end -}}
+{{- if and $redisAuth (not .Values.redis.auth.password) -}}
+{{-   $generated = append $generated "redis.auth.password" -}}
+{{- end -}}
+{{- $_ := include "rrst.assertStableSecrets" (dict "missing" $generated "context" .) -}}
+{{- $mongoPassword := "" -}}
+{{- if $mongoAuth -}}
+{{-   $mongoPassword = include "rrst.persistedSecret" (dict "value" .Values.mongodb.auth.rootPassword "stored" (get $stored "mongodb-root-password") "context" .) -}}
+{{- end -}}
+{{- $redisPassword := "" -}}
+{{- if $redisAuth -}}
+{{-   $redisPassword = include "rrst.persistedSecret" (dict "value" .Values.redis.auth.password "stored" (get $stored "redis-password") "context" .) -}}
+{{- end -}}
+
+{{- $database := tpl .Values.datastores.mongo.database . -}}
+{{- $mongoUrl := "" -}}
+{{- if .Values.mongodb.url -}}
+{{-   $mongoUrl = tpl .Values.mongodb.url . -}}
+{{- else if $mongoAuth -}}
+{{-   $mongoUrl = printf "mongodb://root:%s@%s:27017/%s?authSource=admin" ($mongoPassword | b64dec) $mongoHost $database -}}
+{{- else -}}
+{{-   $mongoUrl = printf "mongodb://%s:27017/%s" $mongoHost $database -}}
+{{- end -}}
+{{- $redisUrl := "" -}}
+{{- if .Values.redis.url -}}
+{{-   $redisUrl = tpl .Values.redis.url . -}}
+{{- else if .Values.redis.create -}}
+{{-   if $redisAuth -}}
+{{-     $redisUrl = printf "redis://:%s@%s:6379" ($redisPassword | b64dec) $redisHost -}}
+{{-   else -}}
+{{-     $redisUrl = printf "redis://%s:6379" $redisHost -}}
+{{-   end -}}
+{{- end -}}
+{{- if or $mongoAuth $redisAuth }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $authName }}
+  labels:
+    {{- include "rrst.labels" . | nindent 4 }}
+type: Opaque
+data:
+  {{- if $mongoAuth }}
+  mongodb-root-password: {{ $mongoPassword | quote }}
+  {{- end }}
+  {{- if $redisAuth }}
+  redis-password: {{ $redisPassword | quote }}
+  {{- end }}
+{{- end }}
+---
+# Holds the connection strings (they may carry credentials). Without a Redis URL the `cache` datastore is left out and the
+# service keeps nonces and rate-limit buckets in process memory, which acme.validate only allows for a single replica.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "rrst.fullname" . }}-db-info
+  labels:
+    {{- include "rrst.labels" . | nindent 4 }}
+type: Opaque
+data:
+  datastores__mongo__type: {{ print "mongodb" | b64enc | quote }}
+  datastores__mongo__url: {{ $mongoUrl | b64enc | quote }}
+  datastores__mongo__database: {{ $database | b64enc | quote }}
+  {{- if $redisUrl }}
+  datastores__cache__type: {{ print "redis" | b64enc | quote }}
+  datastores__cache__url: {{ $redisUrl | b64enc | quote }}
+  {{- end }}

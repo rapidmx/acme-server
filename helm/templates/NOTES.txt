@@ -1,0 +1,88 @@
+###############################################################################
+# The RapidMX ACME certificate authority                                      #
+###############################################################################
+
+Directory URL (give it to ACME clients): {{ include "acme.externalUrl" . }}/directory
+Trust anchors (what relying parties must trust): {{ include "acme.externalUrl" . }}/ca/roots.pem
+{{- if eq (include "acme.isDev" .) "true" }}
+
+WARNING: environment is {{ .Values.environment }}. The service skips its production start-up checks, and the certificates it signs
+carry CRL/OCSP/issuer addresses under {{ include "acme.externalUrl" . }}. Do not issue real certificates from this install.
+{{- end }}
+
+This is a certificate authority operated by you. Its root is in no operating-system, browser or mail-client trust store: its
+certificates verify only where the root ({{ include "acme.externalUrl" . }}/ca/roots.pem) has been imported or trusted by policy.
+
+CA material:
+  Issuer certificate and key: Secret "{{ tpl .Values.ca.existingSecret . }}", mounted read-only at /var/lib/acme/ca. It is yours to
+  create and rotate; the chart never generates or changes it. Create one from a `yarn ca:init` output directory (the root
+  private key stays offline, never in this Secret) with:
+    scripts/ca-k8s-secret.sh <ca-dir> {{ tpl .Values.ca.existingSecret . }} -- -n {{ .Release.Namespace }}
+  which prints the ca.items to put in your values. The service exits at start without a usable issuers.json: check
+    kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "rrst.fullname" . }}-services
+{{- if .Values.mail.dkim.existingSecret }}
+  DKIM key for the verification e-mail: Secret "{{ tpl .Values.mail.dkim.existingSecret . }}", key "{{ .Values.mail.dkim.key }}".
+{{- end }}
+
+Verification e-mail (RFC 8823):
+  From:     {{ include "acme.mailFrom" . }}
+  Reply-To: {{ include "acme.mailReplyTo" . }}   <- applicants' replies must reach this address
+{{- if .Values.mail.dkim.existingSecret }}
+  DKIM:     d={{ include "acme.dkimDomain" . }}, selector {{ .Values.mail.dkim.selector }}
+{{- end }}
+DNS records to publish (details in docs/DEPLOYMENT.md):
+  * {{ include "acme.host" . | default "<host>" }}: A/AAAA (or CNAME) to the Gateway's address.
+{{- if .Values.mail.dkim.existingSecret }}
+  * {{ .Values.mail.dkim.selector }}._domainkey.{{ include "acme.dkimDomain" . }}: TXT "v=DKIM1; k=rsa; p=<the public key>".
+{{- end }}
+  * {{ regexReplaceAll "^.*@" (include "acme.mailReplyTo" .) "" }}: MX to the host that receives the replies (below).
+  * {{ regexReplaceAll "^.*@" (include "acme.mailFrom" .) "" }}: SPF (TXT) authorising the outbound SMTP relay; optionally DMARC.
+
+Inbound reply e-mail:
+{{- if .Values.inboundSmtp.enabled }}
+  Built-in SMTP receiver: Service "{{ include "rrst.fullname" . }}-smtp" ({{ .Values.inboundSmtp.service.type }}), port {{ .Values.inboundSmtp.service.port }} -> pod port 2525.
+{{- if eq .Values.inboundSmtp.service.type "LoadBalancer" }}
+  Its address:
+    kubectl -n {{ .Release.Namespace }} get service {{ include "rrst.fullname" . }}-smtp -o wide
+{{- end }}
+  Point the MX record of {{ regexReplaceAll "^.*@" (include "acme.mailReplyTo" .) "" }} at a host name that resolves to it, and make sure port 25 is reachable from the internet.
+{{- if not .Values.inboundSmtp.tls.existingSecret }}
+  No TLS certificate is configured for it (inboundSmtp.tls.existingSecret): mail is received in the clear.
+{{- end }}
+{{- else }}
+  The built-in SMTP receiver is off (inboundSmtp.enabled=false). Deliver replies with your own MTA instead, to
+  POST http://{{ include "rrst.fullname" . }}-services/internal/mail/inbound inside the cluster with the bearer secret below.
+{{- end }}
+{{- if .Values.inboundHttp.enabled }}
+  HTTP ingest (POST /internal/mail/inbound, raw message as the body; not routed through the Gateway) bearer secret:
+    kubectl -n {{ .Release.Namespace }} get secret {{ .Values.secrets.existingSecret | default (printf "%s-secrets" (include "rrst.fullname" .)) }} -o jsonpath='{.data.acme__mail__inbound__http_secret}' | base64 -d
+{{- end }}
+{{- if .Values.metrics.enabled }}
+
+Metrics (GET /metrics on the Service, bearer secret; not routed through the Gateway):
+    kubectl -n {{ .Release.Namespace }} get secret {{ .Values.secrets.existingSecret | default (printf "%s-secrets" (include "rrst.fullname" .)) }} -o jsonpath='{.data.acme__metrics_secret}' | base64 -d
+{{- if .Values.admin.enabled }}
+
+The operator API (search and revoke certificates, suspend accounts) is not routed publicly. Reach it from inside the cluster or:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "rrst.fullname" . }}-services 3000:3000
+  ADMIN=$(kubectl -n {{ .Release.Namespace }} get secret {{ .Values.secrets.existingSecret | default (printf "%s-secrets" (include "rrst.fullname" .)) }} -o jsonpath='{.data.acme__admin_secret}' | base64 -d)
+  curl -H "Authorization: Bearer $ADMIN" -H "X-Operator: you@example.org" "http://localhost:3000/admin/certificates?email=someone@example.com"
+{{- end }}
+{{- end }}
+{{- if and .Values.mongodb.create .Values.mongodb.auth.enabled (not .Values.mongodb.url) }}
+
+MongoDB (the record of every certificate this CA issued - back it up, see docs/DEPLOYMENT.md):
+  Bundled, user root, password:
+    kubectl -n {{ .Release.Namespace }} get secret {{ .Release.Name }}-datastore-auth -o jsonpath='{.data.mongodb-root-password}' | base64 -d
+{{- else if .Values.mongodb.url }}
+
+MongoDB: external (mongodb.url). Back it up: the certificates in it are the only record of what was issued.
+{{- end }}
+{{- if not (include "acme.hasRedis" .) }}
+
+WARNING: no Redis is configured, so nonces and rate limits live in each pod's memory. That is only correct for a single replica.
+{{- end }}
+
+Check the deployment:
+    helm test {{ .Release.Name }} -n {{ .Release.Namespace }}

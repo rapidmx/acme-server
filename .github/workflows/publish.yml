@@ -1,0 +1,118 @@
+name: Publish
+
+# Publishes the image (ghcr.io/rapidmx/acme) and the Helm chart (oci://ghcr.io/rapidmx/charts/acme) for a version tag. The
+# CI workflow runs on the same tag; this one repeats what a release depends on (versions in lock-step, the image builds and
+# the development stack comes up healthy) so a tag pushed by mistake publishes nothing.
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  IMAGE: ghcr.io/rapidmx/acme
+
+jobs:
+  # The versions in package.json, the chart's appVersion and the chart's default image tag are bumped together; the tag has to
+  # name that same version, or the chart would deploy an image other than the one published under it.
+  verify-versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check that the tag, package.json, Chart.yaml and values.yaml agree
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          check() {
+            if [ "$2" != "$VERSION" ]; then
+              echo "$1 is '$2', but the tag is v$VERSION" >&2
+              exit 1
+            fi
+          }
+          check "package.json version" "$(yq '.version' package.json)"
+          check "helm/Chart.yaml appVersion" "$(yq '.appVersion' helm/Chart.yaml)"
+          check "helm/values.yaml service.image.tag" "$(yq '.service.image.tag' helm/values.yaml)"
+
+  publish-docker-image:
+    runs-on: ubuntu-latest
+    needs: verify-versions
+    permissions:
+      contents: read
+      packages: write
+    environment: publish
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build image
+        run: docker build --target runtime -t "$IMAGE:latest" .
+
+      - name: Smoke test the compose stack
+        run: bash ./scripts/test-run.sh
+
+      - name: Login to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io \
+            -u ${{ github.actor }} \
+            --password-stdin
+
+      # The package is created private on first push: make it public once under the organisation's packages settings (GitHub
+      # has no API for that).
+      - name: Push images
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          docker push "$IMAGE:latest"
+          docker tag "$IMAGE:latest" "$IMAGE:$TAG"
+          docker push "$IMAGE:$TAG"
+
+  publish-helm-chart:
+    runs-on: ubuntu-latest
+    needs: verify-versions
+    permissions:
+      contents: read
+      packages: write
+    environment: publish
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v5
+        with:
+          version: v3.15.1
+
+      - name: Extract chart name
+        id: pkg
+        run: |
+          echo "name=$(yq '.name' ./helm/Chart.yaml)" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io \
+            --username "${{ github.actor }}" \
+            --password-stdin
+
+      - name: Add helm repos
+        run: |
+          helm repo add bitnami https://charts.bitnami.com/bitnami
+
+      # From Chart.lock, so the published chart carries the dependency versions that were tested.
+      - name: Fetch dependencies
+        run: |
+          helm dependency build ./helm
+
+      - name: Lint
+        run: |
+          helm lint ./helm -f helm/ci/production-values.yaml
+          helm template acme ./helm -f helm/ci/production-values.yaml > /dev/null
+
+      - name: Package chart
+        run: |
+          helm package ./helm \
+            --version "${GITHUB_REF#refs/tags/v}" \
+            --app-version "${GITHUB_REF#refs/tags/v}"
+
+      - name: Push chart to GHCR
+        run: |
+          CHART_NAME="${{ steps.pkg.outputs.name }}"
+          CHART_VERSION="${GITHUB_REF#refs/tags/v}"
+          helm push "${CHART_NAME}-${CHART_VERSION}.tgz" \
+            "oci://ghcr.io/${{ github.repository_owner }}/charts"

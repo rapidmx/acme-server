@@ -1,0 +1,19 @@
+---
+# The HTTP API and the public trust endpoints. Also how a mail bridge in the cluster reaches POST /internal/mail/inbound and
+# how a scraper reaches GET /metrics (both need their bearer secret): the Gateway routes neither.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "rrst.fullname" . }}-services
+  labels:
+    {{- include "rrst.labels" . | nindent 4 }}
+    app.kubernetes.io/component: services
+spec:
+  ports:
+    - port: 80
+      targetPort: http
+      name: http
+      protocol: TCP
+  selector:
+    {{- include "rrst.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: services

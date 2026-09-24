@@ -1,0 +1,12 @@
+# Local debugging only: the Node inspector can run arbitrary code, so it is published on the host's loopback only and the
+# service keeps the development settings of docker-compose.yml.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.debug.yml up --build
+#
+# Attach with VS Code's "Docker: Attach to Node" launch configuration (port 9229). The build emits no source maps
+# (tsconfig.json), so breakpoints are set in the compiled JavaScript under dist/src.
+services:
+    acme:
+        command: ["node", "--inspect=0.0.0.0:9229", "dist/src/server.js"]
+        ports:
+            - "127.0.0.1:9229:9229"

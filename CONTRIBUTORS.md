@@ -1,0 +1,5 @@
+Contributors should submit an update to this file with a commit in order to receive recognition. Thank you for your contributions.
+
+# List of Contributors
+
+Jean-Philippe Steinmetz <caskater4>

@@ -1,0 +1,73 @@
+{{- /* Fails the render for values that could never make a working CA (see _helpers.tpl). Prints nothing. */ -}}
+{{- $_ := include "acme.validate" . -}}
+{{- $data := dict -}}
+{{- $_ := set $data "NODE_ENV" .Values.environment -}}
+{{- /* The HTTP server's own setting (lower case): matches the container port and the Service. */ -}}
+{{- $_ := set $data "port" "3000" -}}
+{{- $_ := set $data "logger__level" .Values.logs.level -}}
+{{- $_ := set $data "trusted_proxies" (.Values.trustedProxies | default list | toJson) -}}
+{{- $_ := set $data "acme__external_url" (include "acme.externalUrl" .) -}}
+{{- $_ := set $data "acme__website" .Values.acme.website -}}
+{{- if .Values.acme.termsOfServiceUrl -}}
+{{-   $_ := set $data "acme__terms_of_service_url" (tpl .Values.acme.termsOfServiceUrl .) -}}
+{{- end -}}
+{{- if .Values.acme.caaIdentities -}}
+{{-   $_ := set $data "acme__caa_identities" (.Values.acme.caaIdentities | toJson) -}}
+{{- end -}}
+{{- /* The issuing CA(s): the Secret at ca.existingSecret, mounted at /var/lib/acme/ca. */ -}}
+{{- $_ := set $data "acme__ca__manifest" "/var/lib/acme/ca/issuers.json" -}}
+{{- $_ := set $data "acme__mail__from" (include "acme.mailFrom" .) -}}
+{{- $_ := set $data "acme__mail__reply_to" (include "acme.mailReplyTo" .) -}}
+{{- $_ := set $data "acme__mail__dkim_alignment" .Values.acme.dkimAlignment -}}
+{{- with .Values.mail.smtp -}}
+{{-   if .host -}}
+{{-     $_ := set $data "acme__mail__smtp__host" (tpl .host $) -}}
+{{-     $_ := set $data "acme__mail__smtp__port" (.port | toString) -}}
+{{-     $_ := set $data "acme__mail__smtp__secure" (.secure | toString) -}}
+{{-     if .ignoreTLS -}}
+{{-       $_ := set $data "acme__mail__smtp__ignore_tls" "true" -}}
+{{-     end -}}
+{{-     if .user -}}
+{{-       $_ := set $data "acme__mail__smtp__user" (tpl .user $) -}}
+{{-     end -}}
+{{-   end -}}
+{{- end -}}
+{{- /* The Secret at mail.dkim.existingSecret, mounted at /var/lib/acme/dkim. */ -}}
+{{- if .Values.mail.dkim.existingSecret -}}
+{{-   $_ := set $data "acme__mail__dkim__domain" (include "acme.dkimDomain" .) -}}
+{{-   $_ := set $data "acme__mail__dkim__selector" .Values.mail.dkim.selector -}}
+{{-   $_ := set $data "acme__mail__dkim__private_key_path" (printf "/var/lib/acme/dkim/%s" .Values.mail.dkim.key) -}}
+{{- end -}}
+{{- /* The built-in SMTP receiver. It listens on 2525 (unprivileged); the -smtp Service maps port 25 to it. */ -}}
+{{- if .Values.inboundSmtp.enabled -}}
+{{-   $_ := set $data "acme__mail__inbound__smtp__enabled" "true" -}}
+{{-   $_ := set $data "acme__mail__inbound__smtp__host" "0.0.0.0" -}}
+{{-   $_ := set $data "acme__mail__inbound__smtp__port" "2525" -}}
+{{-   $_ := set $data "acme__mail__inbound__smtp__max_size_bytes" (.Values.inboundSmtp.maxSizeBytes | int64 | toString) -}}
+{{-   if .Values.inboundSmtp.tls.existingSecret -}}
+{{-     $_ := set $data "acme__mail__inbound__smtp__tls_key_path" "/var/lib/acme/smtp-tls/tls.key" -}}
+{{-     $_ := set $data "acme__mail__inbound__smtp__tls_cert_path" "/var/lib/acme/smtp-tls/tls.crt" -}}
+{{-   end -}}
+{{- end -}}
+{{- /* Last, so anything set under service.config overrides what this chart derived above. */ -}}
+{{- range $k, $v := .Values.service.config -}}
+{{-   if kindIs "string" $v -}}
+{{-     $_ := set $data $k (tpl $v $) -}}
+{{-   else if or (kindIs "slice" $v) (kindIs "map" $v) -}}
+{{-     $_ := set $data $k ($v | toJson) -}}
+{{-   else -}}
+{{-     $_ := set $data $k ($v | toString) -}}
+{{-   end -}}
+{{- end -}}
+---
+# Everything the service reads from its environment that is not a secret. nconf splits the names on "__", so
+# acme__mail__from is acme.mail.from (docs/ARCHITECTURE.md, "Configuration"), and reads a value that looks like JSON (a number,
+# true/false, a list) as that value.
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: {{ include "rrst.fullname" . }}-config
+  labels:
+    {{- include "rrst.labels" . | nindent 4 }}
+data:
+  {{- toYaml $data | nindent 2 }}

@@ -1,0 +1,68 @@
+{{- /*
+The certificate for the Gateway's https listener, from cert-manager. Only when this chart provides it (see "acme.tlsSecret"):
+a tlsSecretName of your own, or a host no public CA could issue for, means nothing is rendered here.
+*/ -}}
+{{- $tlsSecret := include "acme.tlsSecret" . -}}
+{{- if and $tlsSecret .Values.certmanager.enabled (not .Values.gateway.tlsSecretName) }}
+{{-   $host := include "acme.host" . }}
+{{-   $issuerName := tpl .Values.certmanager.name . }}
+{{-   $issuerNamespace := tpl .Values.certmanager.namespace . }}
+{{-   $ownsIssuer := and (eq $issuerName (printf "%s-issuer" (include "rrst.fullname" .))) (eq .Values.certmanager.kind "Issuer") (eq $issuerNamespace .Release.Namespace) }}
+{{-   $gatewayName := tpl .Values.gateway.name . }}
+{{-   $gatewayNamespace := tpl .Values.gateway.namespace . }}
+{{-   if $ownsIssuer }}
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ $issuerName }}
+  labels:
+    {{- include "rrst.labels" . | nindent 4 }}
+spec:
+  acme:
+    server: {{ .Values.certmanager.server }}
+    {{- with .Values.certmanager.email }}
+    email: {{ tpl . $ }}
+    {{- end }}
+    # Named after the Issuer so it has its own ACME account key.
+    privateKeySecretRef:
+      name: {{ $issuerName }}-account-key
+    solvers:
+    - http01:
+        gatewayHTTPRoute:
+          parentRefs:
+          - group: gateway.networking.k8s.io
+            kind: Gateway
+            name: {{ $gatewayName }}
+            namespace: {{ $gatewayNamespace }}
+{{-   end }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "rrst.fullname" . }}-tls
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rrst.labels" . | nindent 4 }}
+spec:
+  secretName: {{ $tlsSecret }}
+  duration: 2160h # 90d
+  renewBefore: 360h # 15d
+  # The use of the common name field has been deprecated since 2000 and is discouraged from being used.
+  commonName: {{ $host }}
+  isCA: false
+  privateKey:
+    algorithm: ECDSA
+    encoding: PKCS1
+    size: 384
+    rotationPolicy: Always
+  usages:
+    - server auth
+  # At least one of a DNS Name, URI, or IP address is required.
+  dnsNames:
+  - {{ $host }}
+  # Issuer references are always required.
+  issuerRef:
+    name: {{ $issuerName }}
+    kind: {{ .Values.certmanager.kind }}
+{{- end }}

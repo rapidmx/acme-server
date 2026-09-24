@@ -1,0 +1,37 @@
+# The smallest set of values that renders a production-like install: for `helm lint` and `helm template` in CI (the values
+# are placeholders; no cluster is contacted, so every generated secret is given explicitly). See docs/DEPLOYMENT.md for a
+# real install.
+host: acme.example.com
+trustedProxies:
+  - 10.42.0.0/16
+ca:
+  existingSecret: acme-ca
+  items:
+    - key: issuers.json
+      path: issuers.json
+    - key: smime-r1--cert.pem
+      path: smime-r1/cert.pem
+    - key: smime-r1--key.pem
+      path: smime-r1/key.pem
+    - key: root-r1--cert.pem
+      path: root-r1/cert.pem
+  passphrase:
+    existingSecret: acme-ca-passphrase
+mail:
+  smtp:
+    host: smtp.example.com
+    user: acme
+    existingSecret: acme-smtp
+  dkim:
+    existingSecret: acme-dkim
+    selector: acme1
+metrics:
+  secret: ci-metrics-secret
+inboundHttp:
+  secret: ci-inbound-secret
+mongodb:
+  auth:
+    rootPassword: ci-mongo-password
+redis:
+  auth:
+    password: ci-redis-password

@@ -1,0 +1,261 @@
+{{- $replicas := int .Values.service.replicas }}
+{{- $hasGeneratedSecrets := or .Values.metrics.enabled .Values.inboundHttp.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rrst.fullname" . }}-services
+  labels:
+    {{- include "rrst.labels" . | nindent 4 }}
+    app.kubernetes.io/component: services
+spec:
+  replicas: {{ $replicas }}
+  # A new pod is Ready before an old one leaves: no gap for a request or a nonce in flight.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include "rrst.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: services
+  template:
+    metadata:
+      labels:
+        {{- include "rrst.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: services
+        {{- /*
+        The Bitnami subcharts' NetworkPolicies admit pods labelled "<fullname>-client" when networkPolicy.allowExternal is
+        false - without the label the pod could not reach the database it is waiting for.
+        */}}
+        {{- if .Values.redis.create }}
+        {{ include "acme.subchartFullname" (dict "name" "redis" "values" .Values.redis "context" $) }}-client: "true"
+        {{- end }}
+        {{- if .Values.mongodb.create }}
+        {{ include "acme.subchartFullname" (dict "name" "mongodb" "values" .Values.mongodb "context" $) }}-client: "true"
+        {{- end }}
+        {{- with .Values.service.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # Roll the pods when their configuration changes - it is only read at start. (Generated secrets never change after the
+        # first install, so they need no checksum; a changed connection string or secret you supply does, so it is included.)
+        checksum/config: {{ include (print $.Template.BasePath "/0_config/config.yaml") . | sha256sum }}
+        checksum/datastores: {{ dict "mongo" (.Values.mongodb.url | default "") "redis" (.Values.redis.url | default "") "mongoCreate" .Values.mongodb.create "redisCreate" .Values.redis.create "explicit" (dict "mongo" (.Values.mongodb.auth.rootPassword | default "") "redis" (.Values.redis.auth.password | default "") "metrics" (.Values.metrics.secret | default "") "inbound" (.Values.inboundHttp.secret | default "")) | toJson | sha256sum }}
+        {{- with .Values.service.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      # The service never talks to the Kubernetes API.
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.service.terminationGracePeriodSeconds }}
+      {{- with .Values.service.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.service.imagePullSecret }}
+      imagePullSecrets:
+        - name: {{ .Values.service.imagePullSecret }}
+      {{- end }}
+      {{- with .Values.service.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.service.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.service.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.service.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml .Values.service.topologySpreadConstraints | nindent 8 }}
+      {{- else if gt $replicas 1 }}
+      # Replicas on different nodes (a node failure must not take the CA down) and, where the cluster has zones, spread over
+      # them; both best effort so a small cluster can still schedule.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "rrst.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: services
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "rrst.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: services
+      {{- end }}
+      {{- if and .Values.service.waitForDatastores (or .Values.mongodb.create .Values.redis.create) }}
+      initContainers:
+        # Waits for the bundled databases' ports, so a first install does not crash-loop while they pull and start. The app's own
+        # image (node), so nothing else is pulled, and a plain TCP connect: no credentials involved.
+        - name: wait-for-datastores
+          image: {{ include "acme.image" . }}
+          imagePullPolicy: {{ ternary "Always" "IfNotPresent" (eq (.Values.service.image.tag | default .Chart.AppVersion | toString) "latest") }}
+          {{- with .Values.service.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          command:
+            - node
+            - -e
+            - |
+              const net = require("net");
+              const targets = process.argv.slice(1).map((t) => t.split(":"));
+              const wait = (host, port) => new Promise((resolve) => {
+                (function attempt() {
+                  const socket = net.connect(Number(port), host);
+                  socket.setTimeout(3000);
+                  const retry = () => { socket.destroy(); setTimeout(attempt, 2000); };
+                  socket.once("connect", () => { socket.removeAllListeners(); socket.on("error", () => {}); socket.end(); resolve(); });
+                  socket.once("error", retry);
+                  socket.once("timeout", retry);
+                })();
+              });
+              Promise.all(targets.map(([host, port]) => wait(host, port))).then(() => process.exit(0));
+            {{- if .Values.mongodb.create }}
+            - {{ printf "%s:27017" (include "acme.subchartFullname" (dict "name" "mongodb" "values" .Values.mongodb "context" $)) | quote }}
+            {{- end }}
+            {{- if .Values.redis.create }}
+            - {{ printf "%s-master:6379" (include "acme.subchartFullname" (dict "name" "redis" "values" .Values.redis "context" $)) | quote }}
+            {{- end }}
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+      {{- end }}
+      containers:
+        - name: {{ include "rrst.name" . }}
+          image: {{ include "acme.image" . }}
+          imagePullPolicy: {{ ternary "Always" "IfNotPresent" (eq (.Values.service.image.tag | default .Chart.AppVersion | toString) "latest") }}
+          {{- with .Values.service.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "rrst.fullname" . }}-config
+            - secretRef:
+                name: {{ include "rrst.fullname" . }}-db-info
+            {{- if .Values.secrets.existingSecret }}
+            - secretRef:
+                name: {{ tpl .Values.secrets.existingSecret . }}
+            {{- else if $hasGeneratedSecrets }}
+            - secretRef:
+                name: {{ include "rrst.fullname" . }}-secrets
+            {{- end }}
+          env:
+            {{- if .Values.mail.smtp.existingSecret }}
+            # The relay password, as acme.mail.smtp.pass.
+            - name: acme__mail__smtp__pass
+              valueFrom:
+                secretKeyRef:
+                  name: {{ tpl .Values.mail.smtp.existingSecret . }}
+                  key: {{ .Values.mail.smtp.passwordKey }}
+            {{- end }}
+            {{- if .Values.ca.passphrase.existingSecret }}
+            # The passphrase of the issuing CA's encrypted key: issuers.json names this variable (`passphrase_env`).
+            - name: ACME_CA_KEY_PASSPHRASE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ tpl .Values.ca.passphrase.existingSecret . }}
+                  key: {{ .Values.ca.passphrase.key }}
+            {{- end }}
+            {{- with .Values.service.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+            {{- if .Values.inboundSmtp.enabled }}
+            - name: smtp
+              containerPort: 2525
+              protocol: TCP
+            {{- end }}
+          {{- with .Values.service.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.service.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.service.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if gt (int .Values.service.preStopSleepSeconds) 0 }}
+          # Keeps the pod serving while it is still being removed from the Gateway's and the SMTP Service's endpoints.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", {{ .Values.service.preStopSleepSeconds | toString | quote }}]
+          {{- end }}
+          resources:
+            {{- toYaml .Values.service.resources | nindent 12 }}
+          volumeMounts:
+            # The root file system is read-only; Node needs a scratch directory.
+            - name: tmp
+              mountPath: /tmp
+            - name: ca
+              mountPath: /var/lib/acme/ca
+              readOnly: true
+            {{- if .Values.mail.dkim.existingSecret }}
+            - name: dkim
+              mountPath: /var/lib/acme/dkim
+              readOnly: true
+            {{- end }}
+            {{- if and .Values.inboundSmtp.enabled .Values.inboundSmtp.tls.existingSecret }}
+            - name: smtp-tls
+              mountPath: /var/lib/acme/smtp-tls
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+        # The CA's certificate(s) and key: never generated here, always the operator's Secret. Mode 0440 with the pod's
+        # fsGroup makes the files readable by the service and nobody else.
+        - name: ca
+          secret:
+            secretName: {{ tpl .Values.ca.existingSecret . }}
+            defaultMode: 288 # octal 0440
+            {{- with .Values.ca.items }}
+            items:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
+        {{- if .Values.mail.dkim.existingSecret }}
+        - name: dkim
+          secret:
+            secretName: {{ tpl .Values.mail.dkim.existingSecret . }}
+            defaultMode: 288 # octal 0440
+        {{- end }}
+        {{- if and .Values.inboundSmtp.enabled .Values.inboundSmtp.tls.existingSecret }}
+        # The receiver reads the files once at start, so a renewed certificate needs a rollout restart to take effect.
+        - name: smtp-tls
+          secret:
+            secretName: {{ tpl .Values.inboundSmtp.tls.existingSecret . }}
+            defaultMode: 288 # octal 0440
+        {{- end }}
+{{- if and (gt $replicas 1) .Values.service.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "rrst.fullname" . }}-services
+  labels:
+    {{- include "rrst.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ .Values.service.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "rrst.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: services
+{{- end }}

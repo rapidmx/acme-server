@@ -1,0 +1,42 @@
+{{- if .Values.inboundSmtp.enabled }}
+{{- $svc := .Values.inboundSmtp.service }}
+---
+# Applicants' reply e-mails: port 25 of the MX host reaches the service's built-in SMTP receiver (container port 2525). A
+# separate Service from the HTTP one so it can be a LoadBalancer or NodePort on its own, with its own source ranges and
+# annotations, and so nothing but SMTP is ever exposed through it. Point the MX record of mail.replyTo's domain at this
+# Service's address (see NOTES.txt).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "rrst.fullname" . }}-smtp
+  labels:
+    {{- include "rrst.labels" . | nindent 4 }}
+    app.kubernetes.io/component: services
+  {{- with $svc.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $svc.type }}
+  {{- if ne $svc.type "ClusterIP" }}
+  externalTrafficPolicy: {{ $svc.externalTrafficPolicy }}
+  {{- end }}
+  {{- if and (eq $svc.type "LoadBalancer") $svc.loadBalancerIP }}
+  loadBalancerIP: {{ $svc.loadBalancerIP }}
+  {{- end }}
+  {{- if and (eq $svc.type "LoadBalancer") $svc.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml $svc.loadBalancerSourceRanges | nindent 4 }}
+  {{- end }}
+  ports:
+    - name: smtp
+      port: {{ $svc.port }}
+      targetPort: smtp
+      protocol: TCP
+      {{- if and (eq $svc.type "NodePort") $svc.nodePort }}
+      nodePort: {{ $svc.nodePort }}
+      {{- end }}
+  selector:
+    {{- include "rrst.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: services
+{{- end }}

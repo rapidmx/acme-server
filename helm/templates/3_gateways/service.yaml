@@ -1,0 +1,133 @@
+{{- if .Values.gateway.enabled }}
+{{- $host := include "acme.host" . }}
+{{- $tlsSecret := include "acme.tlsSecret" . }}
+{{- $gatewayName := tpl .Values.gateway.name . }}
+{{- $gatewayNamespace := tpl .Values.gateway.namespace . }}
+{{- /* This chart creates the Gateway only when it is asked to attach to the one it would create itself. */}}
+{{- $ownsGateway := and (eq $gatewayName (printf "%s-gateway" (include "rrst.fullname" .))) (eq $gatewayNamespace .Release.Namespace) }}
+{{- $httpSection := .Values.gateway.httpSectionName }}
+{{- $httpsSection := .Values.gateway.httpsSectionName }}
+{{- if $ownsGateway }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ $gatewayName }}
+  labels:
+    {{- include "rrst.labels" . | nindent 4 }}
+spec:
+  gatewayClassName: {{ .Values.gateway.className | quote }}
+  listeners:
+  - name: {{ $httpSection }}
+    port: 80
+    protocol: HTTP
+    {{- with $host }}
+    hostname: {{ . | quote }}
+    {{- end }}
+    allowedRoutes:
+      namespaces:
+        from: All
+  {{- if $tlsSecret }}
+  - name: {{ $httpsSection }}
+    port: 443
+    # TLS is terminated on the listener; an HTTPRoute has no `tls` field.
+    protocol: HTTPS
+    {{- with $host }}
+    hostname: {{ . | quote }}
+    {{- end }}
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - kind: Secret
+        name: {{ $tlsSecret }}
+    allowedRoutes:
+      namespaces:
+        from: All
+  {{- end }}
+{{- else if $tlsSecret }}
+---
+# The Gateway that terminates TLS for `host` lives in another namespace, so it may only read the certificate Secret in this
+# one because this says so. Its https listener has to reference that Secret.
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: {{ include "rrst.fullname" . }}-tls
+  labels:
+    {{- include "rrst.labels" . | nindent 4 }}
+spec:
+  from:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    namespace: {{ $gatewayNamespace }}
+  to:
+  - group: ""
+    kind: Secret
+    name: {{ $tlsSecret }}
+{{- end }}
+---
+# The CA's public paths. With TLS, this route is attached to the https listener only; plain HTTP is answered by the redirect
+# route below, so no client - and no certificate's CRL/OCSP/AIA address, all https:// - ever depends on cleartext.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "rrst.fullname" . }}-httproute
+  labels:
+    {{- include "rrst.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+  - name: {{ $gatewayName }}
+    namespace: {{ $gatewayNamespace }}
+    sectionName: {{ ternary $httpsSection $httpSection (ne $tlsSecret "") }}
+  {{- with $host }}
+  hostnames:
+  - {{ . | quote }}
+  {{- end }}
+  rules:
+  - matches:
+    {{- range .Values.gateway.publicPaths }}
+    - path:
+        type: PathPrefix
+        value: {{ . }}
+    {{- end }}
+    backendRefs:
+    - name: {{ include "rrst.fullname" . }}-services
+      port: 80
+    {{- if and $tlsSecret (not .Values.gateway.hsts) }}
+    # Standard Gateway API filter, so it works on any implementation (Envoy Gateway, nginx-gateway-fabric, ...).
+    filters:
+    - type: ResponseHeaderModifier
+      responseHeaderModifier:
+        remove:
+        - Strict-Transport-Security
+    {{- end }}
+{{- if $tlsSecret }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "rrst.fullname" . }}-http-redirect
+  labels:
+    {{- include "rrst.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+  - name: {{ $gatewayName }}
+    namespace: {{ $gatewayNamespace }}
+    sectionName: {{ $httpSection }}
+  {{- with $host }}
+  hostnames:
+  - {{ . | quote }}
+  {{- end }}
+  rules:
+  # cert-manager's HTTP-01 solver adds its own, longer /.well-known/acme-challenge/<token> match to this listener while it
+  # validates the certificate; the more specific match wins over this catch-all.
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /
+    filters:
+    - type: RequestRedirect
+      requestRedirect:
+        scheme: https
+        statusCode: 301
+{{- end }}
+{{- end }}

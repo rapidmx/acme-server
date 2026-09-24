@@ -1,0 +1,157 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: node:24-trixie-slim
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Cache node_modules, dist
+        uses: actions/cache@v5
+        with:
+          path: |
+            node_modules
+            dist
+          key: ${{ runner.os }}-yarn-${{ hashFiles('yarn.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-yarn-
+
+      - name: Install dependencies
+        run: export MONGOMS_DISABLE_POSTINSTALL=1 REDISMS_DISABLE_POSTINSTALL=true && yarn install --immutable
+
+      # `rapidrest build` lints ./src and compiles into dist/src.
+      - name: Build
+        run: yarn build
+
+      - name: Lint
+        run: yarn lint
+
+  test:
+    runs-on: ubuntu-latest
+    needs: build
+    container:
+      image: node:24-trixie-slim
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Restore node_modules cache
+        uses: actions/cache@v5
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-yarn-${{ hashFiles('yarn.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-yarn-
+
+      # The tests start an in-memory MongoDB (mongodb-memory-server downloads its binary on first use).
+      - name: Install system dependencies
+        run: apt-get update && apt-get install -y --no-install-recommends ca-certificates libcurl4t64 curl
+
+      - name: Install dependencies
+        run: export REDISMS_DISABLE_POSTINSTALL=true && yarn install --immutable
+
+      - name: Run tests with coverage
+        run: yarn test
+
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: junit
+          path: junit.xml
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage
+          path: coverage
+          if-no-files-found: ignore
+
+  # The image builds, and the development stack (docker-compose.yml: CA, MongoDB, Redis, mail sink, generated development CA)
+  # comes up healthy and serves the directory, the trust anchor and the CRL.
+  docker:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build the runtime image
+        run: docker build --target runtime -t acme:ci .
+
+      - name: Build the development CA generator image
+        run: docker build --target ca-init -t acme-ca-init:ci .
+
+      - name: Smoke test the compose stack
+        run: bash ./scripts/test-run.sh
+
+  helm:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v5
+        with:
+          version: v3.15.1
+
+      - name: Fetch the chart's dependencies
+        run: |
+          helm repo add bitnami https://charts.bitnami.com/bitnami
+          helm dependency build ./helm
+
+      # `helm lint` reports the chart's own `fail` messages as INFO, so the renders below are what actually prove the
+      # values combinations work (a production-like one, with inbound SMTP and several replicas, and a development one).
+      - name: Lint
+        run: helm lint ./helm -f helm/ci/production-values.yaml
+
+      - name: Render a production-like install
+        run: helm template acme ./helm -f helm/ci/production-values.yaml > /dev/null
+
+      - name: Render a production-like install with inbound SMTP and three replicas
+        run: helm template acme ./helm -f helm/ci/production-values.yaml --set inboundSmtp.enabled=true --set service.replicas=3 > /dev/null
+
+      - name: Render a development install
+        run: helm template acme ./helm --set environment=dev --set ca.existingSecret=acme-ca > /dev/null
+
+      - name: Refuse several replicas without Redis
+        run: |
+          if helm template acme ./helm -f helm/ci/production-values.yaml --set service.replicas=3 --set redis.create=false > /dev/null 2> err.txt; then
+            echo "expected the render to fail" >&2
+            exit 1
+          fi
+          grep -q "there is no Redis" err.txt
+
+  validate:
+    runs-on: ubuntu-latest
+    needs: build
+    container:
+      image: node:24-trixie-slim
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Run validation script
+        run: |
+          set +e
+          bash ./validate.sh

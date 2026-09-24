@@ -1,0 +1,25 @@
+apiVersion: v2
+description: >-
+  Installs the RapidMX ACME certificate authority - an ACME (RFC 8555) server that issues S/MIME certificates for e-mail
+  addresses with the RFC 8823 email-reply-00 challenge - into a Kubernetes cluster, with MongoDB and Redis as optional
+  dependencies.
+name: acme
+version: 0.1.0
+appVersion: 0.1.0
+dependencies:
+  - name: mongodb
+    repository: '@bitnami'
+    version: ~18.4.4
+    condition: mongodb.create
+    tags:
+      - dbs
+      - mongodb
+    alias: mongodb
+  - name: redis
+    version: ~24.1.3
+    repository: '@bitnami'
+    condition: redis.create
+    tags:
+      - cache
+      - redis
+    alias: redis

@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ include "rrst.fullname" . }}-test-connection"
+  labels:
+    {{- include "rrst.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": hook-succeeded
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  {{- if .Values.service.imagePullSecret }}
+  imagePullSecrets:
+    - name: {{ .Values.service.imagePullSecret }}
+  {{- end }}
+  {{- with .Values.service.podSecurityContext }}
+  securityContext:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  containers:
+    # The app's own image (there is no curl or wget in it): the directory is what every ACME client starts with.
+    - name: directory
+      image: {{ include "acme.image" . }}
+      {{- with .Values.service.securityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      command:
+        - node
+        - -e
+        - "fetch(process.argv[1]).then((r) => r.json()).then((d) => process.exit(d.newNonce && d.newOrder ? 0 : 1), () => process.exit(1))"
+        - http://{{ include "rrst.fullname" . }}-services/directory
