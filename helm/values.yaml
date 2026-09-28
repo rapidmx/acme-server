@@ -192,7 +192,7 @@ service:
   image:
     registry: ghcr.io
     repository: rapidmx/acme
-    tag: 0.1.0
+    tag: 0.2.0
   imagePullSecret: ''
   # More than one replica needs Redis (nonces and rate limits would otherwise be per pod): the render fails without it.
   replicas: 1

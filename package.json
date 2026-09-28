@@ -1,6 +1,6 @@
 {
     "name": "@rapidmx/acme-server",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "private": true,
     "description": "The RapidMX ACME certificate authority: issues S/MIME signing and encryption certificates for e-mail addresses over ACME (RFC 8555) with the RFC 8823 email-reply-00 challenge.",
     "type": "module",

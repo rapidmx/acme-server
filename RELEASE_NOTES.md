@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.2.0
+
 ### Added
 
 - **The RapidMX ACME certificate authority: a standalone service that issues S/MIME certificates for e-mail addresses.** Built because the public CA the server's enrollment defaulted to (`acme.castle.cloud`) never finished a request (stuck in "verification" for more than 24 hours on the live test server). It speaks ACME (RFC 8555) with the RFC 8823 `email-reply-00` challenge, so `@rapidmx/restapi`'s `Rfc8823AcmeSigningCertificateEnrollment` can use it by changing `mail:pki:rfc8823:directory_url` to `https://acme.rapidmx.io/directory`; it is also tested against the independent `acme-client` package.
