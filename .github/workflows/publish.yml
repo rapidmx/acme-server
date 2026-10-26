@@ -1,27 +1,84 @@
 name: Publish
 
-# Publishes the image (ghcr.io/rapidmx/acme) and the Helm chart (oci://ghcr.io/rapidmx/charts/acme) for a version tag. The
-# CI workflow runs on the same tag; this one repeats what a release depends on (versions in lock-step, the image builds and
-# the development stack comes up healthy) so a tag pushed by mistake publishes nothing.
+# Publishes the image (ghcr.io/rapidmx/acme) and the Helm chart (oci://ghcr.io/rapidmx/charts/acme) for a version tag, once
+# CI has passed on it. This repeats what a release depends on (versions in lock-step, the image builds and the development
+# stack comes up healthy) so a tag pushed by mistake publishes nothing.
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_run:
+    workflows: ["CI"]
+    types:
+      - completed
+
+permissions:
+  contents: read
 
 env:
   IMAGE: ghcr.io/rapidmx/acme
+  RELEASE_TAG: ${{ github.event.workflow_run.head_branch }}
 
 jobs:
+  # A release pushes main and its tag at the same commit, and each push runs CI. Publish only from the tag's own CI run,
+  # and only once every CI run of that commit has finished green: a failed run on either ref (even one that passes when
+  # rerun) blocks the release until it is rerun green, which triggers this workflow again.
+  check:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      startsWith(github.event.workflow_run.head_branch, 'v')
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Require a release tag on main and every CI run of its commit green
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          TAG: ${{ github.event.workflow_run.head_branch }}
+          WORKFLOW_ID: ${{ github.event.workflow_run.workflow_id }}
+        run: |
+          set -euo pipefail
+          if ! git tag --points-at HEAD | grep -qxF "$TAG" || ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::Tag $TAG doesn't point at $SHA on main; not publishing."
+            exit 1
+          fi
+          url="repos/$REPO/actions/workflows/$WORKFLOW_ID/runs?head_sha=$SHA&per_page=100"
+          for attempt in $(seq 1 90); do
+            pending=$(gh api "$url" --jq '[.workflow_runs[] | select(.status != "completed")] | length')
+            failed=$(gh api "$url" --jq '[.workflow_runs[] | select(.status == "completed" and .conclusion != "success")
+              | "\(.id) (\(.head_branch)): \(.conclusion)"] | join(", ")')
+            if [ -n "$failed" ]; then
+              echo "::error::Not publishing $TAG: a CI run of $SHA did not succeed: $failed. Rerun it; a green rerun triggers this workflow again."
+              exit 1
+            fi
+            if [ "$pending" = 0 ]; then
+              echo "Every CI run of $SHA succeeded: $(gh api "$url" --jq '[.workflow_runs[] | "\(.id) (\(.head_branch))"] | join(", ")')"
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "::error::Timed out waiting for the other CI runs of $SHA to finish."
+          exit 1
+
   # The versions in package.json, the chart's appVersion and the chart's default image tag are bumped together; the tag has to
   # name that same version, or the chart would deploy an image other than the one published under it.
   verify-versions:
+    needs: check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Check that the tag, package.json, Chart.yaml and values.yaml agree
         run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
+          VERSION="${RELEASE_TAG#v}"
           check() {
             if [ "$2" != "$VERSION" ]; then
               echo "$1 is '$2', but the tag is v$VERSION" >&2
@@ -34,13 +91,15 @@ jobs:
 
   publish-docker-image:
     runs-on: ubuntu-latest
-    needs: verify-versions
+    needs: [check, verify-versions]
     permissions:
       contents: read
       packages: write
     environment: publish
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Build image
         run: docker build --target runtime -t "$IMAGE:latest" .
@@ -58,14 +117,14 @@ jobs:
       # has no API for that).
       - name: Push images
         run: |
-          TAG="${GITHUB_REF#refs/tags/v}"
+          TAG="${RELEASE_TAG#v}"
           docker push "$IMAGE:latest"
           docker tag "$IMAGE:latest" "$IMAGE:$TAG"
           docker push "$IMAGE:$TAG"
 
   publish-helm-chart:
     runs-on: ubuntu-latest
-    needs: verify-versions
+    needs: [check, verify-versions]
     permissions:
       contents: read
       packages: write
@@ -73,6 +132,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Set up Helm
         uses: azure/setup-helm@v5
@@ -107,12 +168,12 @@ jobs:
       - name: Package chart
         run: |
           helm package ./helm \
-            --version "${GITHUB_REF#refs/tags/v}" \
-            --app-version "${GITHUB_REF#refs/tags/v}"
+            --version "${RELEASE_TAG#v}" \
+            --app-version "${RELEASE_TAG#v}"
 
       - name: Push chart to GHCR
         run: |
           CHART_NAME="${{ steps.pkg.outputs.name }}"
-          CHART_VERSION="${GITHUB_REF#refs/tags/v}"
+          CHART_VERSION="${RELEASE_TAG#v}"
           helm push "${CHART_NAME}-${CHART_VERSION}.tgz" \
             "oci://ghcr.io/${{ github.repository_owner }}/charts"
