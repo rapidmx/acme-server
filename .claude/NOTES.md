@@ -151,3 +151,16 @@ Standing process rule, applies to every rapidmx/rapidrest repo: push pending com
 ### 2026-10-26 - Publish waits for CI
 
 `.github/workflows/publish.yml` used to run on the tag push itself, with no tests (v0.2.0's Publish ran beside a failing CI). It now runs on `workflow_run` of CI, like activesync's Publish: a `check` job runs only for a tag push's CI run, verifies the tag points at the commit on main, and waits until every CI run of that commit has finished, refusing if any did not succeed (a green rerun triggers Publish again); `verify-versions` and both publish jobs need it, check out `workflow_run.head_sha`, and take the version from `workflow_run.head_branch` (`RELEASE_TAG`) instead of `GITHUB_REF`. Not yet exercised by a real release.
+
+
+## Agent model assignments (JP, 2026-10-28)
+
+Standing rule for every AI agent working on this project (applies to all RapidMX and RapidREST repositories):
+
+| Kind of work | Model |
+|---|---|
+| Design (specs, plans, architecture proposals) | Opus 5.5 (`claude-opus-5-5`) |
+| Architectural review | Opus 5.5 (`claude-opus-5-5`) |
+| Code review (finding and verifying defects in diffs or code) | Sonnet 5.5 (`claude-sonnet-5-5`) |
+| Fixes (implementing review findings and other code changes) | Sonnet 5.5 (`claude-sonnet-5-5`) |
+| Simple operations (file operations, renames, project initialization and similar mechanical tasks) | Haiku 5.5 (`claude-haiku-5-5`) |
